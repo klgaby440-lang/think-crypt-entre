@@ -1,0 +1,2586 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Choisissez votre formule</title>
+
+<style>
+
+/* =====================================================
+   BASE
+===================================================== */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: Arial, Helvetica, sans-serif; 
+}
+
+body {
+    min-height: 100vh;
+
+    background:
+        linear-gradient(
+            135deg,
+            #f5f7ff,
+            #eef1f8
+        );
+
+    color: #182033;
+
+    padding: 40px 20px;
+}
+
+.payment-container {
+    max-width: 1100px;
+    margin: auto;
+}
+
+
+/* =====================================================
+   EN-TÊTE
+===================================================== */
+
+.header {
+    text-align: center;
+    margin-bottom: 55px;
+}
+
+.header h1 {
+    font-size: 42px;
+    margin-bottom: 12px;
+}
+
+.header p {
+    color: #687086;
+    font-size: 17px;
+}
+
+
+/* =====================================================
+   FORMULES
+===================================================== */
+
+.plans {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 22px;
+}
+
+
+/* =====================================================
+   CARTE DE FORMULE
+===================================================== */
+
+.plan {
+
+    position: relative;
+
+    background:
+        linear-gradient(
+            #ffffff,
+            #ffffff
+        ) padding-box,
+
+        linear-gradient(
+            135deg,
+            #6c4cff,
+            #2196f3,
+            #00c853,
+            #ff9800,
+            #e91e63
+        ) border-box;
+
+    border: 2px solid transparent;
+
+    border-radius: 20px;
+
+    padding: 30px;
+
+    box-shadow:
+        0 12px 35px
+        rgba(0,0,0,0.08);
+
+    transition:
+        transform 0.3s ease,
+        box-shadow 0.3s ease;
+}
+
+.plan:hover {
+
+    transform: translateY(-7px);
+
+    box-shadow:
+        0 18px 45px
+        rgba(0,0,0,0.12);
+}
+
+
+/* =====================================================
+   CONTOUR PREMIUM
+===================================================== */
+
+.plan.premium {
+
+    background:
+        linear-gradient(
+            #ffffff,
+            #ffffff
+        ) padding-box,
+
+        linear-gradient(
+            135deg,
+            #6c4cff,
+            #9c27b0,
+            #e91e63,
+            #ff9800,
+            #6c4cff
+        ) border-box;
+}
+
+
+/* =====================================================
+   CONTOUR INTERMÉDIAIRE
+===================================================== */
+
+.plan.intermediate {
+
+    background:
+        linear-gradient(
+            #ffffff,
+            #ffffff
+        ) padding-box,
+
+        linear-gradient(
+            135deg,
+            #2196f3,
+            #00bcd4,
+            #6c4cff,
+            #00c853,
+            #2196f3
+        ) border-box;
+}
+
+
+/* =====================================================
+   CONTOUR STANDARD
+===================================================== */
+
+.plan.standard {
+
+    background:
+        linear-gradient(
+            #ffffff,
+            #ffffff
+        ) padding-box,
+
+        linear-gradient(
+            135deg,
+            #00c853,
+            #00e676,
+            #2196f3,
+            #9c27b0,
+            #00c853
+        ) border-box;
+}
+
+
+/* =====================================================
+   PETITES COURONNES
+===================================================== */
+
+.crown {
+
+    position: absolute;
+
+    top: 18px;
+    right: 18px;
+
+    font-size: 18px;
+
+    line-height: 1;
+
+    opacity: 0.72;
+
+    filter:
+        drop-shadow(
+            0 1px 2px
+            rgba(0,0,0,0.12)
+        );
+
+    transition:
+        transform 0.25s ease,
+        opacity 0.25s ease;
+}
+
+
+/* Petit mouvement discret au survol */
+
+.plan:hover .crown {
+
+    transform:
+        translateY(-2px);
+
+    opacity: 1;
+}
+
+
+/* =====================================================
+   COURONNE PREMIUM — OR
+===================================================== */
+
+.premium .crown {
+
+    color: #d4af37;
+
+    text-shadow:
+        0 1px 1px
+        rgba(120,80,0,0.25);
+}
+
+
+/* =====================================================
+   COURONNE INTERMÉDIAIRE — ARGENT / SILVER
+===================================================== */
+
+.intermediate .crown {
+
+    color: #aeb4bb;
+
+    text-shadow:
+        0 1px 1px
+        rgba(60,60,60,0.22);
+}
+
+
+/* =====================================================
+   COURONNE STANDARD — BRONZE
+===================================================== */
+
+.standard .crown {
+
+    color: #a86432;
+
+    text-shadow:
+        0 1px 1px
+        rgba(80,40,15,0.25);
+}
+
+
+/* =====================================================
+   TITRES
+===================================================== */
+
+.plan h2 {
+
+    font-size: 25px;
+    margin-bottom: 10px;
+}
+
+.plan-description {
+
+    color: #737c90;
+
+    min-height: 45px;
+
+    line-height: 1.5;
+}
+
+
+/* =====================================================
+   PRIX
+===================================================== */
+
+.price {
+
+    margin: 25px 0;
+
+    font-size: 40px;
+
+    font-weight: bold;
+}
+
+.price span {
+
+    font-size: 16px;
+
+    color: #737c90;
+
+    font-weight: normal;
+}
+
+
+/* =====================================================
+   FONCTIONNALITÉS
+===================================================== */
+
+.features {
+
+    list-style: none;
+
+    margin-bottom: 25px;
+}
+
+.features li {
+
+    margin: 13px 0;
+
+    color: #4d566b;
+}
+
+.features li::before {
+
+    content: "✓";
+
+    color: #6c4cff;
+
+    font-weight: bold;
+
+    margin-right: 9px;
+}
+
+
+/* =====================================================
+   BOUTONS
+===================================================== */
+
+.pay-button {
+
+    width: 100%;
+
+    border: none;
+
+    padding: 15px;
+
+    border-radius: 10px;
+
+    background: #182033;
+
+    color: white;
+
+    font-size: 16px;
+
+    font-weight: bold;
+
+    cursor: pointer;
+
+    transition: 0.2s;
+}
+
+.pay-button:hover {
+
+    background: #6c4cff;
+}
+
+
+/* =====================================================
+   FENÊTRE DE PAIEMENT
+===================================================== */
+
+.modal {
+
+    display: none;
+
+    position: fixed;
+
+    inset: 0;
+
+    background:
+        rgba(0,0,0,0.65);
+
+    align-items: center;
+
+    justify-content: center;
+
+    padding: 20px;
+
+    z-index: 1000;
+}
+
+.modal.active {
+
+    display: flex;
+}
+
+.payment-box {
+
+    width: 100%;
+
+    max-width: 540px;
+
+    max-height: 92vh;
+
+    overflow-y: auto;
+
+    background: white;
+
+    border-radius: 22px;
+
+    padding: 30px;
+
+    position: relative;
+
+    animation:
+        showBox 0.25s ease;
+}
+
+@keyframes showBox {
+
+    from {
+
+        transform:
+            scale(0.90);
+
+        opacity: 0;
+    }
+
+    to {
+
+        transform:
+            scale(1);
+
+        opacity: 1;
+    }
+}
+
+
+/* =====================================================
+   FERMER
+===================================================== */
+
+.close {
+
+    position: absolute;
+
+    right: 20px;
+
+    top: 15px;
+
+    border: none;
+
+    background: transparent;
+
+    font-size: 28px;
+
+    cursor: pointer;
+
+    color: #555;
+}
+
+
+/* =====================================================
+   TITRE PAIEMENT
+===================================================== */
+
+.payment-box h2 {
+
+    margin-bottom: 7px;
+}
+
+.selected-plan {
+
+    color: #6c4cff;
+
+    font-weight: bold;
+
+    margin-bottom: 20px;
+}
+
+
+/* =====================================================
+   MONTANT
+===================================================== */
+
+.amount {
+
+    background: #f4f5f9;
+
+    padding: 17px;
+
+    border-radius: 10px;
+
+    margin-bottom: 22px;
+
+    text-align: center;
+
+    font-size: 25px;
+
+    font-weight: bold;
+}
+
+
+/* =====================================================
+   MÉTHODES PRINCIPALES
+===================================================== */
+
+.payment-method-title {
+
+    font-size: 14px;
+
+    font-weight: bold;
+
+    margin-bottom: 10px;
+}
+
+.method-buttons {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap: 10px;
+
+    margin-bottom: 22px;
+}
+
+.method-button {
+
+    border:
+        1px solid
+        #d8dce5;
+
+    background: white;
+
+    border-radius: 12px;
+
+    padding: 12px 8px;
+
+    cursor: pointer;
+
+    transition: 0.2s;
+
+    font-weight: bold;
+
+    color: #30384c;
+}
+
+.method-button:hover {
+
+    border-color:
+        #6c4cff;
+}
+
+.method-button.active {
+
+    border:
+        2px solid
+        #6c4cff;
+
+    background:
+        #f5f2ff;
+}
+
+
+/* =====================================================
+   LOGOS
+===================================================== */
+
+.logo {
+
+    display: inline-flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    min-width: 52px;
+
+    height: 28px;
+
+    padding: 4px 8px;
+
+    border-radius: 7px;
+
+    font-size: 10px;
+
+    font-weight: 900;
+
+    margin-bottom: 5px;
+
+    color: white;
+}
+
+.logo-card {
+
+    background:
+        linear-gradient(
+            135deg,
+            #1a1f71,
+            #e31b23
+        );
+}
+
+.logo-mobile {
+
+    background:
+        linear-gradient(
+            135deg,
+            #182033,
+            #6c4cff
+        );
+}
+
+.logo-bank {
+
+    background:
+        linear-gradient(
+            135deg,
+            #263238,
+            #607d8b
+        );
+}
+
+
+/* =====================================================
+   ZONES DYNAMIQUES
+===================================================== */
+
+.dynamic-payment {
+
+    display: none;
+
+    animation:
+        fadeIn 0.25s ease;
+}
+
+.dynamic-payment.active {
+
+    display: block;
+}
+
+@keyframes fadeIn {
+
+    from {
+
+        opacity: 0;
+
+        transform:
+            translateY(5px);
+    }
+
+    to {
+
+        opacity: 1;
+
+        transform:
+            translateY(0);
+    }
+}
+
+
+/* =====================================================
+   MOBILE MONEY
+===================================================== */
+
+.provider-title {
+
+    font-size: 16px;
+
+    font-weight: bold;
+
+    margin-bottom: 12px;
+}
+
+.provider-grid {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(2, 1fr);
+
+    gap: 10px;
+
+    margin-bottom: 18px;
+}
+
+.provider {
+
+    border:
+        1px solid
+        #d8dce5;
+
+    background: white;
+
+    padding: 11px;
+
+    border-radius: 12px;
+
+    cursor: pointer;
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 8px;
+
+    font-weight: bold;
+
+    transition: 0.2s;
+}
+
+.provider:hover {
+
+    border-color:
+        #6c4cff;
+}
+
+.provider.selected {
+
+    border:
+        2px solid
+        #6c4cff;
+
+    background:
+        #f5f2ff;
+}
+
+
+/* =====================================================
+   LOGOS MOBILE MONEY
+===================================================== */
+
+.logo-airtel {
+
+    background: #e60000;
+}
+
+.logo-africell {
+
+    background: #0057b8;
+}
+
+.logo-mtn {
+
+    background: #ffcc00;
+
+    color: #111;
+}
+
+.logo-afrimoney {
+
+    background: #00843d;
+}
+
+.logo-orange {
+
+    background: #ff7900;
+}
+
+
+/* =====================================================
+   FORMULAIRES
+===================================================== */
+
+.form-group {
+
+    margin-bottom: 16px;
+}
+
+.form-group label {
+
+    display: block;
+
+    margin-bottom: 7px;
+
+    font-weight: bold;
+
+    font-size: 14px;
+}
+
+.form-group input,
+.form-group select {
+
+    width: 100%;
+
+    padding: 13px;
+
+    border:
+        1px solid
+        #d5d9e2;
+
+    border-radius: 9px;
+
+    outline: none;
+
+    font-size: 15px;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+
+    border-color:
+        #6c4cff;
+
+    box-shadow:
+        0 0 0 3px
+        rgba(108,76,255,0.08);
+}
+
+
+/* =====================================================
+   CARTES BANCAIRES
+===================================================== */
+
+.card-brands {
+
+    display: flex;
+
+    gap: 8px;
+
+    flex-wrap: wrap;
+
+    margin-bottom: 15px;
+}
+
+.card-brand {
+
+    padding: 7px 11px;
+
+    border-radius: 7px;
+
+    font-size: 11px;
+
+    font-weight: bold;
+
+    border:
+        1px solid
+        #ddd;
+
+    background:
+        #fafafa;
+}
+
+.visa {
+
+    color:
+        #1434cb;
+}
+
+.mastercard {
+
+    color:
+        #eb001b;
+}
+
+.amex {
+
+    color:
+        #006fcf;
+}
+
+
+/* =====================================================
+   VIREMENT BANCAIRE
+===================================================== */
+
+.bank-information {
+
+    background:
+        #f7f8fb;
+
+    border:
+        1px solid
+        #e0e3eb;
+
+    border-radius: 14px;
+
+    padding: 17px;
+
+    margin-bottom: 18px;
+}
+
+.bank-information h3 {
+
+    font-size: 16px;
+
+    margin-bottom: 13px;
+}
+
+.bank-line {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 15px;
+
+    padding: 8px 0;
+
+    border-bottom:
+        1px solid
+        #e6e8ee;
+
+    font-size: 13px;
+}
+
+.bank-line:last-child {
+
+    border-bottom: none;
+}
+
+.bank-label {
+
+    color:
+        #737c90;
+}
+
+.bank-value {
+
+    font-weight: bold;
+
+    text-align: right;
+
+    word-break: break-word;
+}
+
+.bank-note {
+
+    background:
+        #fff8e6;
+
+    border:
+        1px solid
+        #f1dfad;
+
+    color:
+        #765a16;
+
+    padding: 12px;
+
+    border-radius: 10px;
+
+    font-size: 12px;
+
+    line-height: 1.5;
+
+    margin-bottom: 18px;
+}
+
+
+/* =====================================================
+   BOUTON CONFIRMATION
+===================================================== */
+
+.confirm-button {
+
+    width: 100%;
+
+    border: none;
+
+    padding: 15px;
+
+    background:
+        #6c4cff;
+
+    color: white;
+
+    font-size: 16px;
+
+    font-weight: bold;
+
+    border-radius: 10px;
+
+    cursor: pointer;
+
+    margin-top: 5px;
+
+    transition: 0.2s;
+}
+
+.confirm-button:hover {
+
+    background:
+        #5638e6;
+}
+
+.secure {
+
+    text-align: center;
+
+    color:
+        #777f91;
+
+    font-size: 12px;
+
+    margin-top: 15px;
+}
+
+
+/* =====================================================
+   MESSAGE
+===================================================== */
+
+.status-message {
+
+    margin-top: 12px;
+
+    padding: 12px;
+
+    border-radius: 10px;
+
+    background:
+        #f4f5f9;
+
+    color:
+        #626b7e;
+
+    font-size: 12px;
+
+    line-height: 1.5;
+}
+
+
+/* =====================================================
+   SUCCÈS
+===================================================== */
+
+.success {
+
+    display: none;
+
+    text-align: center;
+}
+
+.success.active {
+
+    display: block;
+}
+
+.success-icon {
+
+    font-size: 60px;
+
+    margin-bottom: 15px;
+}
+
+.success h2 {
+
+    margin-bottom: 10px;
+}
+
+.success p {
+
+    color:
+        #697286;
+
+    line-height: 1.6;
+}
+
+
+/* =====================================================
+   RESPONSIVE
+===================================================== */
+
+@media (max-width: 850px) {
+
+    .plans {
+
+        grid-template-columns: 1fr;
+
+        max-width: 500px;
+
+        margin: auto;
+    }
+
+    .header h1 {
+
+        font-size: 32px;
+    }
+}
+
+@media (max-width: 450px) {
+
+    .method-buttons {
+
+        grid-template-columns: 1fr;
+    }
+
+    .provider-grid {
+
+        grid-template-columns: 1fr;
+    }
+
+    .bank-line {
+
+        flex-direction: column;
+
+        gap: 3px;
+    }
+
+    .bank-value {
+
+        text-align: left;
+    }
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<!-- =====================================================
+     CONTENEUR PRINCIPAL
+===================================================== -->
+
+<div class="payment-container">
+
+
+    <div class="header">
+
+        <h1>
+            Choisissez votre formule
+        </h1>
+
+        <p>
+            Sélectionnez l'offre qui correspond le mieux à vos besoins.
+        </p>
+
+    </div>
+
+
+    <!-- =================================================
+         FORMULES
+    ================================================= -->
+
+    <div class="plans">
+
+
+        <!-- =================================================
+             PREMIUM
+        ================================================= -->
+
+        <div class="plan premium">
+
+            <!-- COURONNE OR -->
+            <div class="crown">
+                👑
+            </div>
+
+            <h2>
+                Premium
+            </h2>
+
+            <p class="plan-description">
+                Pour profiter de toutes les fonctionnalités.
+            </p>
+
+            <div class="price">
+
+                <span id="premium-price">
+                    8
+                </span>
+
+                <span id="premium-currency">
+                    USD
+                </span>
+
+            </div>
+
+            <ul class="features">
+
+                <li>
+                    Toutes les fonctionnalités
+                </li>
+
+                <li>
+                    Support prioritaire
+                </li>
+
+                <li>
+                    Accès complet
+                </li>
+
+            </ul>
+
+            <button
+                class="pay-button"
+                onclick="openPayment('premium')">
+
+                Payer maintenant
+
+            </button>
+
+        </div>
+
+
+        <!-- =================================================
+             INTERMÉDIAIRE
+        ================================================= -->
+
+        <div class="plan intermediate">
+
+            <!-- COURONNE ARGENT -->
+            <div class="crown">
+                👑
+            </div>
+
+            <h2>
+                Intermédiaire
+            </h2>
+
+            <p class="plan-description">
+                Pour aller plus loin.
+            </p>
+
+            <div class="price">
+
+                <span id="intermediate-price">
+                    5
+                </span>
+
+                <span id="intermediate-currency">
+                    USD
+                </span>
+
+            </div>
+
+            <ul class="features">
+
+                <li>
+                    Fonctionnalités avancées
+                </li>
+
+                <li>
+                    Support prioritaire
+                </li>
+
+                <li>
+                    Plus de possibilités
+                </li>
+
+            </ul>
+
+            <button
+                class="pay-button"
+                onclick="openPayment('intermediate')">
+
+                Payer maintenant
+
+            </button>
+
+        </div>
+
+
+        <!-- =================================================
+             STANDARD
+        ================================================= -->
+
+        <div class="plan standard">
+
+            <!-- COURONNE BRONZE -->
+            <div class="crown">
+                👑
+            </div>
+
+            <h2>
+                Standard (Basique)
+            </h2>
+
+            <p class="plan-description">
+                Pour commencer simplement.
+            </p>
+
+            <div class="price">
+
+                <span id="standard-price">
+                    2
+                </span>
+
+                <span id="standard-currency">
+                    USD
+                </span>
+
+            </div>
+
+            <ul class="features">
+
+                <li>
+                    Fonctionnalités essentielles
+                </li>
+
+                <li>
+                    Support standard
+                </li>
+
+                <li>
+                    Accès de base
+                </li>
+
+            </ul>
+
+            <button
+                class="pay-button"
+                onclick="openPayment('standard')">
+
+                Payer maintenant
+
+            </button>
+
+        </div>
+
+
+    </div>
+
+</div>
+
+
+<!-- =====================================================
+     MODAL PAIEMENT
+===================================================== -->
+
+<div
+    class="modal"
+    id="paymentModal">
+
+
+    <div class="payment-box">
+
+
+        <button
+            class="close"
+            onclick="closePayment()">
+
+            ×
+
+        </button>
+
+
+        <!-- =================================================
+             FORMULAIRE
+        ================================================= -->
+
+        <div id="paymentForm">
+
+
+            <h2>
+                Finaliser le paiement
+            </h2>
+
+
+            <p
+                class="selected-plan"
+                id="selectedPlan">
+
+                Offre Premium
+
+            </p>
+
+
+            <div class="amount">
+
+                <span id="paymentAmount">
+                    50 USD
+                </span>
+
+            </div>
+
+
+            <!-- =================================================
+                 MÉTHODES DE PAIEMENT
+            ================================================= -->
+
+            <div class="payment-method-title">
+
+                Choisissez votre méthode de paiement
+
+            </div>
+
+
+            <div class="method-buttons">
+
+
+                <!-- CARTE -->
+
+                <button
+                    class="method-button active"
+                    onclick="selectMethod('card', this)">
+
+                    <div class="logo logo-card">
+                        CARD
+                    </div>
+
+                    <br>
+
+                    Carte bancaire
+
+                </button>
+
+
+                <!-- MOBILE MONEY -->
+
+                <button
+                    class="method-button"
+                    onclick="selectMethod('mobile', this)">
+
+                    <div class="logo logo-mobile">
+                        MOBILE
+                    </div>
+
+                    <br>
+
+                    Mobile Money
+
+                </button>
+
+
+                <!-- VIREMENT -->
+
+                <button
+                    class="method-button"
+                    onclick="selectMethod('bank', this)">
+
+                    <div class="logo logo-bank">
+                        BANK
+                    </div>
+
+                    <br>
+
+                    Virement bancaire
+
+                </button>
+
+
+            </div>
+
+
+            <!-- =================================================
+                 CARTE BANCAIRE
+            ================================================= -->
+
+            <div
+                id="cardPayment"
+                class="dynamic-payment active">
+
+
+                <div class="provider-title">
+
+                    Type de carte
+
+                </div>
+
+
+                <div class="card-brands">
+
+                    <span class="card-brand visa">
+                        VISA
+                    </span>
+
+                    <span class="card-brand mastercard">
+                        MASTERCARD
+                    </span>
+
+                    <span class="card-brand amex">
+                        AMERICAN EXPRESS
+                    </span>
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Numéro de carte
+                    </label>
+
+                    <input
+                        type="text"
+                        inputmode="numeric"
+                        maxlength="19"
+                        autocomplete="cc-number"
+                        placeholder="•••• •••• •••• ••••">
+
+                </div>
+
+
+                <div
+                    style="
+                        display:grid;
+                        grid-template-columns:1fr 1fr;
+                        gap:12px;
+                    ">
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Expiration
+                        </label>
+
+                        <input
+                            type="text"
+                            autocomplete="cc-exp"
+                            placeholder="MM/AA">
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label>
+                            CVV
+                        </label>
+
+                        <input
+                            type="password"
+                            inputmode="numeric"
+                            maxlength="4"
+                            autocomplete="cc-csc"
+                            placeholder="•••">
+
+                    </div>
+
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Nom sur la carte
+                    </label>
+
+                    <input
+                        type="text"
+                        autocomplete="cc-name"
+                        placeholder="Nom du titulaire">
+
+                </div>
+
+
+            </div>
+
+
+            <!-- =================================================
+                 MOBILE MONEY
+            ================================================= -->
+
+            <div
+                id="mobilePayment"
+                class="dynamic-payment">
+
+
+                <div class="provider-title">
+
+                    Sélectionnez votre opérateur
+
+                </div>
+
+
+                <div class="provider-grid">
+
+
+                    <!-- AIRTEL -->
+
+                    <button
+                        class="provider"
+                        onclick="
+                            selectProvider(
+                                'Airtel Money',
+                                this
+                            )
+                        ">
+
+                        <span class="logo logo-airtel">
+                            AIRTEL
+                        </span>
+
+                        Airtel Money
+
+                    </button>
+
+
+                    <!-- AFRICELL -->
+
+                    <button
+                        class="provider"
+                        onclick="
+                            selectProvider(
+                                'Africell Money',
+                                this
+                            )
+                        ">
+
+                        <span class="logo logo-africell">
+                            AFRICELL
+                        </span>
+
+                        Africell Money
+
+                    </button>
+
+
+                    <!-- MTN -->
+
+                    <button
+                        class="provider"
+                        onclick="
+                            selectProvider(
+                                'MTN Mobile Money',
+                                this
+                            )
+                        ">
+
+                        <span class="logo logo-mtn">
+                            MTN
+                        </span>
+
+                        MTN Mobile Money
+
+                    </button>
+
+
+
+                    <!-- ORANGE -->
+
+                    <button
+                        class="provider"
+                        onclick="
+                            selectProvider(
+                                'Orange Money',
+                                this
+                            )
+                        ">
+
+                        <span class="logo logo-orange">
+                            ORANGE
+                        </span>
+
+                        Orange Money
+
+                    </button>
+
+
+                </div>
+
+
+                <!-- FORMULAIRE MOBILE -->
+
+                <div
+                    id="mobileForm"
+                    style="display:none;">
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Opérateur sélectionné
+                        </label>
+
+                        <input
+                            type="text"
+                            id="selectedProvider"
+                            readonly>
+
+                    </div>
+
+
+                    <div class="form-group">
+
+                        <label>
+                            Numéro Mobile Money
+                        </label>
+
+                        <input
+                            type="tel"
+                            id="mobileNumber"
+                            placeholder="+243 XXX XXX XXX">
+
+                    </div>
+
+
+                    <div class="status-message">
+
+                        Votre demande sera associée à
+                        l'opérateur Mobile Money sélectionné.
+
+                    </div>
+
+
+                </div>
+
+
+            </div>
+
+
+            <!-- =================================================
+                 VIREMENT BANCAIRE
+            ================================================= -->
+
+            <div
+                id="bankPayment"
+                class="dynamic-payment">
+
+
+                <div class="provider-title">
+
+                    Informations pour le virement
+
+                </div>
+
+
+                <div class="bank-information">
+
+
+                    <h3>
+                        Compte destinataire
+                    </h3>
+
+
+                    <div class="bank-line">
+
+                        <span class="bank-label">
+                            Banque
+                        </span>
+
+                        <span
+                            class="bank-value"
+                            id="bankName">
+
+                            Ma Banque
+
+                        </span>
+
+                    </div>
+
+
+                    <div class="bank-line">
+
+                        <span class="bank-label">
+                            Titulaire
+                        </span>
+
+                        <span
+                            class="bank-value"
+                            id="bankAccountName">
+
+                            Mon Entreprise
+
+                        </span>
+
+                    </div>
+
+
+                    <div class="bank-line">
+
+                        <span class="bank-label">
+                            Numéro de compte
+                        </span>
+
+                        <span
+                            class="bank-value"
+                            id="bankAccountNumber">
+
+                            XXXX XXXX XXXX
+
+                        </span>
+
+                    </div>
+
+
+                    <div class="bank-line">
+
+                        <span class="bank-label">
+                            IBAN
+                        </span>
+
+                        <span
+                            class="bank-value"
+                            id="bankIban">
+
+                            XXXX XXXX XXXX
+
+                        </span>
+
+                    </div>
+
+
+                    <div class="bank-line">
+
+                        <span class="bank-label">
+                            Référence
+                        </span>
+
+                        <span
+                            class="bank-value"
+                            id="bankReference">
+
+                            PAIEMENT-001
+
+                        </span>
+
+                    </div>
+
+
+                </div>
+
+
+                <div class="bank-note">
+
+                    Effectuez le virement avec la référence
+                    indiquée ci-dessus. Après le virement,
+                    votre serveur devra vérifier la réception
+                    des fonds avant de confirmer définitivement
+                    la commande.
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Nom du titulaire du compte payeur
+                    </label>
+
+                    <input
+                        type="text"
+                        id="bankPayerName"
+                        placeholder="Nom complet">
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Banque utilisée pour le virement
+                    </label>
+
+                    <input
+                        type="text"
+                        id="payerBank"
+                        placeholder="Nom de votre banque">
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Référence du virement
+                    </label>
+
+                    <input
+                        type="text"
+                        id="transferReference"
+                        placeholder="Référence fournie par votre banque">
+
+                </div>
+
+
+            </div>
+
+
+            <!-- =================================================
+                 CONFIRMATION
+            ================================================= -->
+
+            <button
+                class="confirm-button"
+                onclick="confirmPayment()">
+
+                Continuer le paiement
+
+            </button>
+
+
+            <p class="secure">
+
+                🔒 Paiement sécurisé
+
+            </p>
+
+
+        </div>
+
+
+        <!-- =================================================
+             SUCCÈS
+        ================================================= -->
+
+        <div
+            class="success"
+            id="success">
+
+
+            <div class="success-icon">
+                ✅
+            </div>
+
+
+            <h2>
+                Demande enregistrée
+            </h2>
+
+
+            <p id="successMessage">
+
+                Votre demande de paiement a été enregistrée.
+
+            </p>
+
+
+        </div>
+
+
+    </div>
+
+</div>
+
+
+<script>
+
+
+/* =====================================================
+   CONFIGURATION
+===================================================== */
+
+const CONFIG = {
+
+    currency: "USD",
+
+    plans: {
+
+        premium: {
+
+            name: "Premium",
+
+            price: 8
+
+        },
+
+        intermediate: {
+
+            name: "Intermédiaire",
+
+            price: 5
+
+        },
+
+        standard: {
+
+            name: "Standard (Basique)",
+
+            price: 2
+
+        }
+
+    },
+
+    bankTransfer: {
+
+        bankName: "Ma Banque",
+
+        accountName: "Mon Entreprise",
+
+        accountNumber: "XXXX XXXX XXXX",
+
+        iban: "XXXX XXXX XXXX",
+
+        reference: "PAIEMENT-001"
+
+    }
+
+};
+
+
+/* =====================================================
+   VARIABLES
+===================================================== */
+
+let selectedPlan = null;
+
+let selectedMethod = "card";
+
+let selectedProvider = null;
+
+
+/* =====================================================
+   CHARGER LES PRIX
+===================================================== */
+
+function loadPrices() {
+
+    document.getElementById(
+        "premium-price"
+    ).textContent =
+        CONFIG.plans.premium.price;
+
+
+    document.getElementById(
+        "intermediate-price"
+    ).textContent =
+        CONFIG.plans.intermediate.price;
+
+
+    document.getElementById(
+        "standard-price"
+    ).textContent =
+        CONFIG.plans.standard.price;
+
+
+    document.getElementById(
+        "premium-currency"
+    ).textContent =
+        CONFIG.currency;
+
+
+    document.getElementById(
+        "intermediate-currency"
+    ).textContent =
+        CONFIG.currency;
+
+
+    document.getElementById(
+        "standard-currency"
+    ).textContent =
+        CONFIG.currency;
+
+
+    document.getElementById(
+        "bankName"
+    ).textContent =
+        CONFIG.bankTransfer.bankName;
+
+
+    document.getElementById(
+        "bankAccountName"
+    ).textContent =
+        CONFIG.bankTransfer.accountName;
+
+
+    document.getElementById(
+        "bankAccountNumber"
+    ).textContent =
+        CONFIG.bankTransfer.accountNumber;
+
+
+    document.getElementById(
+        "bankIban"
+    ).textContent =
+        CONFIG.bankTransfer.iban;
+
+
+    document.getElementById(
+        "bankReference"
+    ).textContent =
+        CONFIG.bankTransfer.reference;
+
+}
+
+
+/* =====================================================
+   OUVRIR LE PAIEMENT
+===================================================== */
+
+function openPayment(planId) {
+
+    selectedPlan =
+        CONFIG.plans[planId];
+
+
+    document.getElementById(
+        "selectedPlan"
+    ).textContent =
+        "Offre " +
+        selectedPlan.name;
+
+
+    document.getElementById(
+        "paymentAmount"
+    ).textContent =
+        selectedPlan.price +
+        " " +
+        CONFIG.currency;
+
+
+    document
+        .getElementById("paymentModal")
+        .classList.add("active");
+
+
+    selectedMethod = "card";
+
+    selectedProvider = null;
+
+
+    document
+        .querySelectorAll(".method-button")
+        .forEach(function(button) {
+
+            button.classList.remove("active");
+
+        });
+
+
+    document
+        .querySelector(".method-button")
+        .classList.add("active");
+
+
+    showPaymentSection("cardPayment");
+
+}
+
+
+/* =====================================================
+   AFFICHER UNE SECTION
+===================================================== */
+
+function showPaymentSection(sectionId) {
+
+    document
+        .querySelectorAll(".dynamic-payment")
+        .forEach(function(section) {
+
+            section.classList.remove("active");
+
+        });
+
+
+    document
+        .getElementById(sectionId)
+        .classList.add("active");
+
+}
+
+
+/* =====================================================
+   CHOISIR LA MÉTHODE
+===================================================== */
+
+function selectMethod(method, button) {
+
+    selectedMethod = method;
+
+
+    document
+        .querySelectorAll(".method-button")
+        .forEach(function(btn) {
+
+            btn.classList.remove("active");
+
+        });
+
+
+    button.classList.add("active");
+
+
+    if (method === "card") {
+
+        showPaymentSection(
+            "cardPayment"
+        );
+
+    }
+
+
+    if (method === "mobile") {
+
+        showPaymentSection(
+            "mobilePayment"
+        );
+
+    }
+
+
+    if (method === "bank") {
+
+        showPaymentSection(
+            "bankPayment"
+        );
+
+    }
+
+}
+
+
+/* =====================================================
+   CHOISIR MOBILE MONEY
+===================================================== */
+
+function selectProvider(provider, button) {
+
+    selectedProvider =
+        provider;
+
+
+    document
+        .querySelectorAll(".provider")
+        .forEach(function(btn) {
+
+            btn.classList.remove("selected");
+
+        });
+
+
+    button.classList.add("selected");
+
+
+    document.getElementById(
+        "mobileForm"
+    ).style.display = "block";
+
+
+    document.getElementById(
+        "selectedProvider"
+    ).value =
+        provider;
+
+}
+
+
+/* =====================================================
+   CONFIRMER
+===================================================== */
+
+function confirmPayment() {
+
+    if (!selectedPlan) {
+
+        alert(
+            "Veuillez choisir une formule."
+        );
+
+        return;
+
+    }
+
+
+    /* =================================================
+       MOBILE MONEY
+    ================================================= */
+
+    if (selectedMethod === "mobile") {
+
+
+        if (!selectedProvider) {
+
+            alert(
+                "Veuillez sélectionner votre opérateur Mobile Money."
+            );
+
+            return;
+
+        }
+
+
+        const phone =
+            document
+                .getElementById(
+                    "mobileNumber"
+                )
+                .value
+                .trim();
+
+
+        if (!phone) {
+
+            alert(
+                "Veuillez entrer votre numéro Mobile Money."
+            );
+
+            return;
+
+        }
+
+
+        console.log({
+
+            paymentMethod:
+                "Mobile Money",
+
+            provider:
+                selectedProvider,
+
+            phone:
+                phone,
+
+            plan:
+                selectedPlan.name,
+
+            amount:
+                selectedPlan.price,
+
+            currency:
+                CONFIG.currency
+
+        });
+
+
+        showSuccess(
+
+            "Votre demande Mobile Money pour " +
+            selectedProvider +
+            " a été préparée pour un montant de " +
+            selectedPlan.price +
+            " " +
+            CONFIG.currency +
+            "."
+
+        );
+
+        return;
+
+    }
+
+
+    /* =================================================
+       VIREMENT BANCAIRE
+    ================================================= */
+
+    if (selectedMethod === "bank") {
+
+
+        const payerName =
+            document
+                .getElementById(
+                    "bankPayerName"
+                )
+                .value
+                .trim();
+
+
+        const payerBank =
+            document
+                .getElementById(
+                    "payerBank"
+                )
+                .value
+                .trim();
+
+
+        const transferReference =
+            document
+                .getElementById(
+                    "transferReference"
+                )
+                .value
+                .trim();
+
+
+        if (!payerName) {
+
+            alert(
+                "Veuillez entrer le nom du titulaire du compte."
+            );
+
+            return;
+
+        }
+
+
+        if (!payerBank) {
+
+            alert(
+                "Veuillez indiquer la banque utilisée."
+            );
+
+            return;
+
+        }
+
+
+        if (!transferReference) {
+
+            alert(
+                "Veuillez entrer la référence du virement."
+            );
+
+            return;
+
+        }
+
+
+        console.log({
+
+            paymentMethod:
+                "Virement bancaire",
+
+            payerName:
+                payerName,
+
+            payerBank:
+                payerBank,
+
+            transferReference:
+                transferReference,
+
+            recipientBank:
+                CONFIG.bankTransfer.bankName,
+
+            recipientAccount:
+                CONFIG.bankTransfer.accountNumber,
+
+            plan:
+                selectedPlan.name,
+
+            amount:
+                selectedPlan.price,
+
+            currency:
+                CONFIG.currency
+
+        });
+
+
+        showSuccess(
+
+            "Votre demande de virement pour l'offre " +
+            selectedPlan.name +
+            " a été enregistrée. " +
+            "Le paiement devra être vérifié avant confirmation."
+
+        );
+
+        return;
+
+    }
+
+
+    /* =================================================
+       CARTE BANCAIRE
+    ================================================= */
+
+    if (selectedMethod === "card") {
+
+
+        console.log({
+
+            paymentMethod:
+                "Carte bancaire",
+
+            plan:
+                selectedPlan.name,
+
+            amount:
+                selectedPlan.price,
+
+            currency:
+                CONFIG.currency
+
+        });
+
+
+        showSuccess(
+
+            "Votre paiement par carte est prêt à être traité."
+
+        );
+
+        return;
+
+    }
+
+}
+
+
+/* =====================================================
+   SUCCÈS
+===================================================== */
+
+function showSuccess(message) {
+
+    document
+        .getElementById(
+            "paymentForm"
+        )
+        .style.display =
+        "none";
+
+
+    document
+        .getElementById(
+            "success"
+        )
+        .classList.add(
+            "active"
+        );
+
+
+    document
+        .getElementById(
+            "successMessage"
+        )
+        .textContent =
+        message;
+
+}
+
+
+/* =====================================================
+   FERMER
+===================================================== */
+
+function closePayment() {
+
+    document
+        .getElementById(
+            "paymentModal"
+        )
+        .classList.remove(
+            "active"
+        );
+
+
+    document
+        .getElementById(
+            "paymentForm"
+        )
+        .style.display =
+        "block";
+
+
+    document
+        .getElementById(
+            "success"
+        )
+        .classList.remove(
+            "active"
+        );
+
+}
+
+
+/* =====================================================
+   CLIQUER À L'EXTÉRIEUR
+===================================================== */
+
+document
+    .getElementById(
+        "paymentModal"
+    )
+    .addEventListener(
+        "click",
+        function(event) {
+
+            if (
+                event.target === this
+            ) {
+
+                closePayment();
+
+            }
+
+        }
+    );
+
+
+/* =====================================================
+   INITIALISATION
+===================================================== */
+
+loadPrices();
+
+</script>
+
+</body>
+</html>
