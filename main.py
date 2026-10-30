@@ -1,0 +1,412 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from secrets import token_urlsafe
+from typing import Any
+
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel, Field
+
+BASE_DIR = Path(__file__).resolve().parent
+
+app = FastAPI(title="Think — serveur de test", version="0.1-test")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# Base de données TEMPORAIRE.
+# Tout est perdu au redémarrage du serveur. Rien ici n'est prévu pour la prod.
+# ---------------------------------------------------------------------------
+
+USERS: dict[int, dict[str, Any]] = {}
+TOKENS: dict[str, int] = {}
+NEXT_USER_ID = 2
+NEXT_TRANSFER_ID = 1003
+NEXT_PAYMENT_ID = 5001
+
+PLAN_PRICES_EUR = {
+    "Standard": 2.99,
+    "Intermédiaire": 6.99,
+    "Premium": 14.99,
+}
+
+THINK_FEE_RATE = 0.03
+AGENCY_FEE_RATES = {
+    "orange": 0.010,
+    "airtel": 0.012,
+    "mpesa": 0.010,
+    "mtn": 0.011,
+    "wise": 0.008,
+    "westernunion": 0.015,
+    "moneygram": 0.014,
+    "remitly": 0.012,
+    "xoom": 0.012,
+    "alipay": 0.008,
+    "wechat": 0.008,
+    "paytm": 0.010,
+}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def make_think_id() -> str:
+    return "THK-" + token_urlsafe(8).replace("-", "A").replace("_", "B").upper()[:12]
+
+
+def hashless_test_password(password: str) -> str:
+    # Serveur de test uniquement : on ne veut pas introduire de dépendance de
+    # hash ici. Ce mécanisme ne doit jamais être repris en production.
+    return password
+
+
+def user_public(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": user["id"],
+        "think_id": user["think_id"],
+        "email": user["email"],
+        "full_name": user["full_name"],
+        "phone": user.get("phone", ""),
+        "balances": dict(user["balances"]),
+        "subscription": dict(user["subscription"]),
+        "transfers": list(user["transfers"]),
+        "notifications": list(user["notifications"]),
+        "created_at": user["created_at"],
+        "test_mode": True,
+    }
+
+
+def add_notification(user: dict[str, Any], title: str, text: str, category: str = "info") -> dict[str, Any]:
+    item = {
+        "id": int(datetime.now().timestamp() * 1000),
+        "title": title,
+        "text": text,
+        "category": category,
+        "read": False,
+        "created_at": now_iso(),
+    }
+    user["notifications"].append(item)
+    user["notifications"] = user["notifications"][-100:]
+    return item
+
+
+def add_transfer(user: dict[str, Any], *, mode: str, agency: str, agency_slug: str,
+                 source_agency: str, source_agency_slug: str | None, recipient: str,
+                 beneficiary: str, amount: float, currency: str, reason: str) -> dict[str, Any]:
+    global NEXT_TRANSFER_ID
+
+    if amount < 1:
+        raise HTTPException(400, "Le montant minimum d'un transfert est de 1 unité.")
+
+    available = float(user["balances"].get(currency, 0))
+    if amount > available:
+        raise HTTPException(400, f"Solde insuffisant en {currency}. Disponible : {available:.2f}.")
+
+    think_fee = round(amount * THINK_FEE_RATE, 2)
+    agency_rate = AGENCY_FEE_RATES.get(agency_slug, 0.01)
+    agency_fee = round(amount * agency_rate, 2)
+    received = round(max(0, amount - think_fee - agency_fee), 2)
+
+    user["balances"][currency] = round(available - amount, 2)
+    created = now_iso()
+    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    date = dt.astimezone().strftime("%d/%m/%Y")
+    time = dt.astimezone().strftime("%H:%M")
+    target = recipient if recipient != "—" else "numéro non renseigné"
+    beneficiary_part = f" ({beneficiary})" if beneficiary and beneficiary != "Bénéficiaire non renseigné" else ""
+    notification = (
+        f"Vous avez envoyé {received:.2f} {currency} le {date} à {time} à {target}{beneficiary_part}. "
+        f"Frais Think : {think_fee:.2f} {currency} · Frais {agency} : {agency_fee:.2f} {currency}."
+    )
+
+    record = {
+        "id": NEXT_TRANSFER_ID,
+        "status": "completed_test",
+        "mode": mode,
+        "agency": agency,
+        "agencySlug": agency_slug,
+        "sourceAgency": source_agency,
+        "sourceAgencySlug": source_agency_slug,
+        "recipient": target,
+        "beneficiary": beneficiary or "Bénéficiaire non renseigné",
+        "amount": amount,
+        "currency": currency,
+        "fee": think_fee,
+        "agencyFee": agency_fee,
+        "total": amount,
+        "received": received,
+        "reason": reason,
+        "createdAt": created,
+        "date": date,
+        "time": time,
+        "notificationText": notification,
+    }
+    NEXT_TRANSFER_ID += 1
+    user["transfers"].append(record)
+    user["transfers"] = user["transfers"][-100:]
+    add_notification(user, "Transfert effectué", notification, "transfer")
+    return record
+
+
+def seed() -> None:
+    demo = {
+        "id": 1,
+        "think_id": "THK-DEMO000001",
+        "email": "demo@think.test",
+        "password": hashless_test_password("ThinkDemo123!"),
+        "full_name": "Compte Démo Think",
+        "phone": "+243900000000",
+        "created_at": now_iso(),
+        "balances": {
+            "CDF": 125000.00,
+            "USD": 250.00,
+            "EUR": 50.00,
+            "GBP": 20.00,
+            "CNY": 300.00,
+            "INR": 1000.00,
+            "BRL": 100.00,
+            "SAR": 200.00,
+            "RUB": 2000.00,
+            "BDT": 5000.00,
+            "IDR": 500000.00,
+            "TRY": 100.00,
+        },
+        "subscription": {
+            "plan": "Standard",
+            "status": "active",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+            "test": True,
+        },
+        "transfers": [],
+        "notifications": [],
+    }
+    USERS[1] = demo
+
+    # Données de test visibles immédiatement dans l'historique.
+    add_transfer(
+        demo, mode="same", agency="Orange Money", agency_slug="orange",
+        source_agency="Compte Think", source_agency_slug=None,
+        recipient="+243812345678", beneficiary="Jean Test", amount=25000,
+        currency="CDF", reason="Test historique"
+    )
+    add_transfer(
+        demo, mode="other", agency="M-Pesa", agency_slug="mpesa",
+        source_agency="Orange Money", source_agency_slug="orange",
+        recipient="+243898765432", beneficiary="Amina Test", amount=25,
+        currency="USD", reason="Test USD"
+    )
+    # On remet une partie du solde après le seed historique afin que le compte
+    # reste confortable pour les tests interactifs.
+    demo["balances"]["CDF"] += 25000
+    demo["balances"]["USD"] += 25
+    add_notification(demo, "Bienvenue sur Think", "Le compte de démonstration est prêt à être utilisé.", "welcome")
+    add_notification(demo, "Abonnement actif", "La formule Standard est active dans le serveur de test.", "subscription")
+
+
+seed()
+
+
+# ---------------------------------------------------------------------------
+# Schémas API
+# ---------------------------------------------------------------------------
+
+class Credentials(BaseModel):
+    email: str
+    password: str
+
+
+class RegisterData(BaseModel):
+    full_name: str = Field(min_length=2, max_length=120)
+    phone: str = Field(min_length=3, max_length=40)
+    email: str
+    password: str = Field(min_length=8, max_length=128)
+
+
+class TransferData(BaseModel):
+    mode: str = "same"
+    agency: str
+    agency_slug: str
+    source_agency: str = "Compte Think"
+    source_agency_slug: str | None = None
+    recipient: str
+    beneficiary: str = "Bénéficiaire non renseigné"
+    amount: float
+    currency: str
+    reason: str = ""
+
+
+class SubscriptionData(BaseModel):
+    plan: str
+    amount: float
+    method: str = "mobile"
+    agency_slug: str | None = None
+
+
+class PaymentData(BaseModel):
+    purpose: str = "subscription"
+    amount: float
+    currency: str = "EUR"
+    description: str = "Paiement Think"
+
+
+def current_user(authorization: str | None) -> dict[str, Any]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "Authentification requise.")
+    token = authorization.split(" ", 1)[1].strip()
+    user_id = TOKENS.get(token)
+    if not user_id or user_id not in USERS:
+        raise HTTPException(401, "Session Think invalide ou expirée.")
+    return USERS[user_id]
+
+
+def issue_token(user: dict[str, Any]) -> str:
+    token = "test_" + token_urlsafe(24)
+    TOKENS[token] = user["id"]
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return FileResponse(BASE_DIR / "Think.html", media_type="text/html")
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "mode": "temporary-memory", "users": len(USERS), "message": "Think test server actif."}
+
+
+@app.post("/api/auth/login")
+def login(data: Credentials):
+    user = next((u for u in USERS.values() if u["email"].lower() == data.email.lower()), None)
+    if not user or user["password"] != data.password:
+        raise HTTPException(401, "E-mail ou mot de passe incorrect.")
+    return {"access_token": issue_token(user), "token_type": "bearer", "think_id": user["think_id"]}
+
+
+@app.post("/api/auth/register")
+def register(data: RegisterData):
+    if any(u["email"].lower() == data.email.lower() for u in USERS.values()):
+        raise HTTPException(409, "Un compte existe déjà avec cet e-mail.")
+    global NEXT_USER_ID
+    user = {
+        "id": NEXT_USER_ID,
+        "think_id": make_think_id(),
+        "email": data.email,
+        "password": hashless_test_password(data.password),
+        "full_name": data.full_name,
+        "phone": data.phone,
+        "created_at": now_iso(),
+        "balances": {"CDF": 0.0, "USD": 0.0, "EUR": 0.0, "GBP": 0.0, "CNY": 0.0, "INR": 0.0, "BRL": 0.0, "SAR": 0.0, "RUB": 0.0, "BDT": 0.0, "IDR": 0.0, "TRY": 0.0},
+        "subscription": {"plan": "", "status": "inactive", "expires_at": None, "test": True},
+        "transfers": [],
+        "notifications": [],
+    }
+    USERS[NEXT_USER_ID] = user
+    NEXT_USER_ID += 1
+    add_notification(user, "Bienvenue sur Think", "Ton compte de test a été créé.", "welcome")
+    return {"access_token": issue_token(user), "token_type": "bearer", "think_id": user["think_id"]}
+
+
+@app.get("/api/me")
+def me(authorization: str | None = Header(default=None)):
+    return user_public(current_user(authorization))
+
+
+@app.get("/api/wallet")
+def wallet(authorization: str | None = Header(default=None)):
+    user = current_user(authorization)
+    return {"balances": dict(user["balances"]), "currency_count": len(user["balances"]), "test_mode": True}
+
+
+@app.get("/api/transfers")
+def transfers(authorization: str | None = Header(default=None)):
+    user = current_user(authorization)
+    return {"items": list(user["transfers"])}
+
+
+@app.post("/api/transfers")
+def create_transfer(data: TransferData, authorization: str | None = Header(default=None)):
+    user = current_user(authorization)
+    transfer = add_transfer(
+        user,
+        mode=data.mode,
+        agency=data.agency,
+        agency_slug=data.agency_slug,
+        source_agency=data.source_agency,
+        source_agency_slug=data.source_agency_slug,
+        recipient=data.recipient,
+        beneficiary=data.beneficiary,
+        amount=data.amount,
+        currency=data.currency,
+        reason=data.reason,
+    )
+    return {"ok": True, "transfer": transfer, "user": user_public(user)}
+
+
+@app.get("/api/subscriptions")
+def subscription(authorization: str | None = Header(default=None)):
+    user = current_user(authorization)
+    return dict(user["subscription"])
+
+
+@app.post("/api/subscriptions/subscribe")
+def subscribe(data: SubscriptionData, authorization: str | None = Header(default=None)):
+    user = current_user(authorization)
+    expected = PLAN_PRICES_EUR.get(data.plan)
+    if expected is None:
+        raise HTTPException(400, "Formule Think inconnue.")
+    if abs(float(data.amount) - expected) > 0.005:
+        raise HTTPException(400, f"Montant incorrect pour {data.plan}. Attendu : {expected:.2f} EUR.")
+
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+    user["subscription"] = {
+        "plan": data.plan,
+        "status": "active",
+        "expires_at": expires.isoformat(),
+        "test": True,
+        "payment_method": data.method,
+        "agency_slug": data.agency_slug,
+    }
+    add_notification(user, "Abonnement activé", f"La formule {data.plan} a été activée sur le serveur de test.", "subscription")
+    return {"ok": True, "payment": {"status": "succeeded_test", "amount": expected, "currency": "EUR"}, "subscription": dict(user["subscription"]), "user": user_public(user)}
+
+
+@app.post("/api/payments/create")
+def create_payment(data: PaymentData, authorization: str | None = Header(default=None)):
+    global NEXT_PAYMENT_ID
+    user = current_user(authorization)
+    payment_id = f"TESTPAY-{NEXT_PAYMENT_ID}"
+    NEXT_PAYMENT_ID += 1
+    return {
+        "public_id": payment_id,
+        "status": "pending_test",
+        "amount": data.amount,
+        "currency": data.currency,
+        "purpose": data.purpose,
+        "description": data.description,
+        "payment_url": f"/test-checkout/{payment_id}",
+        "test_mode": True,
+        "user": user["think_id"],
+    }
+
+
+@app.get("/test-checkout/{payment_id}", response_class=HTMLResponse)
+def fake_checkout(payment_id: str):
+    return HTMLResponse(f"""
+    <!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+    <title>Think · Checkout test</title><style>body{{font-family:system-ui;display:grid;place-items:center;min-height:100vh;background:#f5f3fb;color:#17171c}}main{{background:white;padding:30px;border-radius:22px;max-width:440px;box-shadow:0 20px 60px #0001}}code{{background:#f0eef8;padding:4px 7px;border-radius:7px}}</style></head>
+    <body><main><h1>Checkout Think — TEST</h1><p>Simulation locale du prestataire.</p><p>Référence : <code>{payment_id}</code></p><p>Aucun argent réel ne sera débité.</p><button onclick="history.back()">Retour à Think</button></main></body></html>
+    """)
