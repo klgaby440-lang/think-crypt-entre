@@ -9,6 +9,188 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    text,
+)
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import declarative_base, relationship
+
+import logging
+import os
+import re
+
+logger = logging.getLogger("think.database")
+
+# ---------------------------------------------------------------------------
+# PostgreSQL / SQLAlchemy
+#
+# THINK_BOOTSTRAP_ADMIN_DATABASE_URL : Internal Database URL of the existing
+# Render PostgreSQL instance (currently ClassNet's database). It is used only
+# to check/create the separate think_db database.
+#
+# THINK_DATABASE_NAME : target database name (default: think_db).
+# ---------------------------------------------------------------------------
+
+Base = declarative_base()
+
+
+class ThinkUser(Base):
+    __tablename__ = "think_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    think_id = Column(String(32), nullable=False, unique=True, index=True)
+    email = Column(String(320), nullable=False, unique=True, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(120), nullable=False)
+    phone = Column(String(40), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    wallets = relationship("Wallet", back_populates="user", cascade="all, delete-orphan")
+    payments = relationship("PaymentTransaction", back_populates="user")
+    withdrawals = relationship("Withdrawal", back_populates="user")
+
+
+class Wallet(Base):
+    __tablename__ = "wallets"
+    __table_args__ = (
+        UniqueConstraint("user_id", "currency", name="uq_wallet_user_currency"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    currency = Column(String(3), nullable=False)
+    available_balance = Column(Numeric(20, 2), nullable=False, default=0)
+    reserved_balance = Column(Numeric(20, 2), nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="wallets")
+    ledger_entries = relationship("LedgerEntry", back_populates="wallet")
+
+
+class LedgerEntry(Base):
+    __tablename__ = "ledger_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    wallet_id = Column(Integer, ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    entry_type = Column(String(32), nullable=False)  # DEPOSIT, WITHDRAWAL, FEE, REVERSAL, etc.
+    amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    status = Column(String(24), nullable=False, default="pending")
+    reference = Column(String(128), nullable=True, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    extra_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    wallet = relationship("Wallet", back_populates="ledger_entries")
+
+
+class PaymentTransaction(Base):
+    __tablename__ = "payment_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String(64), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    purpose = Column(String(40), nullable=False)
+    amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    provider = Column(String(32), nullable=False, default="cinetpay")
+    merchant_transaction_id = Column(String(64), nullable=False, unique=True, index=True)
+    provider_transaction_id = Column(String(128), nullable=True, index=True)
+    status = Column(String(32), nullable=False, default="pending")
+    payment_url = Column(Text, nullable=True)
+    provider_response = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="payments")
+
+
+class Withdrawal(Base):
+    __tablename__ = "withdrawals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String(64), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    wallet_id = Column(Integer, ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    amount = Column(Numeric(20, 2), nullable=False)
+    fee = Column(Numeric(20, 2), nullable=False, default=0)
+    net_amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    operator = Column(String(32), nullable=False)
+    phone = Column(String(40), nullable=False)
+    provider_transaction_id = Column(String(128), nullable=True, index=True)
+    status = Column(String(32), nullable=False, default="pending")
+    provider_response = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="withdrawals")
+    wallet = relationship("Wallet")
+
+
+def _sqlalchemy_url(raw_url: str):
+    url = make_url(raw_url)
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+psycopg")
+    return url
+
+
+def initialize_database():
+    """Create the isolated Think database (if missing) and its ORM tables."""
+    admin_raw_url = os.getenv("THINK_BOOTSTRAP_ADMIN_DATABASE_URL")
+    if not admin_raw_url:
+        raise RuntimeError(
+            "Missing THINK_BOOTSTRAP_ADMIN_DATABASE_URL. Set it to the "
+            "Internal Database URL of the existing Render PostgreSQL instance."
+        )
+
+    database_name = os.getenv("THINK_DATABASE_NAME", "think_db").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", database_name):
+        raise RuntimeError("THINK_DATABASE_NAME must be a simple PostgreSQL identifier.")
+
+    admin_url = _sqlalchemy_url(admin_raw_url)
+    admin_engine = create_engine(
+        admin_url,
+        isolation_level="AUTOCOMMIT",
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 10},
+    )
+    try:
+        with admin_engine.connect() as connection:
+            exists = connection.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :database_name"),
+                {"database_name": database_name},
+            ).scalar_one_or_none()
+
+            if exists is None:
+                connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+                logger.info("Created PostgreSQL database %s", database_name)
+            else:
+                logger.info("PostgreSQL database %s already exists", database_name)
+    finally:
+        admin_engine.dispose()
+
+    think_url = admin_url.set(database=database_name)
+    think_engine = create_engine(
+        think_url,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={"connect_timeout": 10},
+    )
+    Base.metadata.create_all(bind=think_engine)
+    logger.info("Think SQLAlchemy tables are ready in database %s", database_name)
+    return think_engine
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -214,6 +396,15 @@ def seed() -> None:
 
 seed()
 
+# Engine kept alive for the lifetime of the FastAPI process.
+database_engine = None
+
+
+@app.on_event("startup")
+def startup_database():
+    global database_engine
+    database_engine = initialize_database()
+
 
 # ---------------------------------------------------------------------------
 # Schémas API
@@ -280,7 +471,7 @@ def issue_token(user: dict[str, Any]) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return FileResponse(BASE_DIR / "Think.html", media_type="text/html")
+    return FileResponse(BASE_DIR / "app" / "index.html", media_type="text/html")
 
 
 @app.get("/health")
