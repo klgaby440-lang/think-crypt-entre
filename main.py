@@ -330,8 +330,9 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Base de données TEMPORAIRE.
-# Tout est perdu au redémarrage du serveur. Rien ici n'est prévu pour la prod.
+# Compatibilité temporaire avec l'ancienne démonstration.
+# Les routes qui utilisent USERS/TOKENS ci-dessous restent en mémoire et seront
+# migrées vers les modèles SQLAlchemy dans la phase suivante.
 # ---------------------------------------------------------------------------
 
 USERS: dict[int, dict[str, Any]] = {}
