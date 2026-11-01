@@ -600,6 +600,7 @@ class ProfilePatch(BaseModel):
     city: str | None = Field(default=None, max_length=100)
     postal_code: str | None = Field(default=None, max_length=24)
     phone: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, min_length=3, max_length=320)
     preferences: dict[str, Any] | None = None
 
 
@@ -881,6 +882,16 @@ def update_profile(
     phone = values.pop("phone", None)
     if phone is not None:
         user.phone = phone.strip()
+
+    email = values.pop("email", None)
+    if email is not None:
+        email = email.strip().lower()
+        if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+            raise HTTPException(status_code=422, detail="Adresse e-mail invalide.")
+        duplicate = db.query(ThinkUser).filter(ThinkUser.email == email, ThinkUser.id != user.id).first()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Cette adresse e-mail est déjà utilisée.")
+        user.email = email
 
     preferences = values.pop("preferences", None)
     if preferences is not None:
