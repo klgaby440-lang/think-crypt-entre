@@ -5587,7 +5587,7 @@ function initWalletInterface(){
     function walletDetailAction(action){
       if(action==="transfer"){showContent("Transactions","Transferts et services financiers",getPageContent("Transactions"));return;}
       const panels={
-        add:["Ajouter de l’argent","Choisis une source et un montant.",`<div class="wallet-form-row"><label class="wallet-form-field">Source<select><option>Compte bancaire</option><option>Carte bancaire</option><option>Service d’agence</option></select></label><label class="wallet-form-field">Montant<input type="number" placeholder="0,00"></label></div><div class="wallet-action-row"><button class="wallet-primary-btn" data-wallet-submit="Ajout préparé">Continuer</button></div>`],
+        add:["Ajouter de l’argent","Créditer un portefeuille de test sans mouvement d’argent réel.",`<div class="wallet-flow-note"><strong>Mode Sandbox uniquement</strong><span>Ce formulaire ajoute un solde fictif pour tester l’interface et les écritures comptables. Il ne lance aucun paiement CinetPay et ne reçoit aucun argent réel.</span></div><form id="walletSandboxCreditForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant de test<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0,00"></label><label class="wallet-form-field">Devise<select name="currency">${Object.keys(walletCurrencies).map(code=>`<option value="${code}" ${code===walletCurrency?"selected":""}>${code}</option>`).join("")}</select></label></div><label class="wallet-form-field">Motif<input name="reason" maxlength="200" placeholder="Test de portefeuille"></label><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Ajouter un solde fictif</button></div></form>`],
         withdraw:["Retirer de l’argent","Choisis l’agence dans laquelle se trouve ton argent.",`<div class="wallet-flow-note"><strong>Choisis parmi nos 13 agences.</strong><span>Think reprend exactement les agences et les logos utilisés dans Transactions.</span></div>${agencyGrid()}<div class="wallet-detail-box"><strong>Étape suivante</strong><p id="walletWithdrawHint">Sélectionne une agence pour afficher le parcours de retrait.</p></div>`],
         balanceView:["Mon solde","Ton solde personnel et sa devise actuelle.",`<div class="wallet-detail-stat-grid"><div class="wallet-detail-stat"><span>Disponible</span><strong id="walletBalanceAvailable">0,00 CDF</strong></div><div class="wallet-detail-stat"><span>Devise</span><strong id="walletBalanceCurrency">CDF</strong></div><div class="wallet-detail-stat"><span>Statut</span><strong>En attente</strong></div></div>`],
         bank:["Compte bancaire","Ajoute un compte et prépare un virement bancaire sécurisé.",`<form class="wallet-form" id="walletBankForm"><div class="wallet-form-row"><label class="wallet-form-field">Titulaire du compte<input required name="holder" autocomplete="name" placeholder="Nom complet"></label><label class="wallet-form-field">Pays<select required name="country"><option>RDC</option><option>France</option><option>États-Unis</option><option>Royaume-Uni</option><option>Autre</option></select></label></div><div class="wallet-form-row"><label class="wallet-form-field">Banque<input required name="bank" autocomplete="organization" placeholder="Nom de la banque"></label><label class="wallet-form-field">Type<select required name="type"><option>Compte courant</option><option>Compte épargne</option></select></label></div><div class="wallet-form-row"><label class="wallet-form-field">IBAN / numéro de compte<input required name="account" autocomplete="off" placeholder="Numéro ou IBAN"></label><label class="wallet-form-field">BIC / SWIFT<input name="swift" autocomplete="off" placeholder="BIC / SWIFT si nécessaire"></label></div><div class="wallet-form-row"><label class="wallet-form-field">Devise<select name="currency"><option>USD</option><option>EUR</option><option>CDF</option><option>GBP</option></select></label><label class="wallet-form-field">Nom du bénéficiaire<input name="beneficiary" autocomplete="name" placeholder="Nom du titulaire"></label></div><div class="wallet-flow-note"><strong>Virement bancaire</strong><span>La validation réelle devra passer par la banque ou un prestataire de paiement connecté et autorisé.</span></div><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Enregistrer le compte</button></div></form>`],
@@ -5605,6 +5605,28 @@ function initWalletInterface(){
       detail.innerHTML=`<div class="wallet-detail-head"><div><div class="wallet-detail-title">${t[0]}</div><div class="wallet-detail-sub">${t[1]}</div></div></div>${t[2]}`;
       const bankForm=$("#walletBankForm");
       if(bankForm) bankForm.addEventListener("submit",event=>{event.preventDefault(); const data=Object.fromEntries(new FormData(bankForm).entries()); localStorage.setItem("think-bank-account",JSON.stringify({bank:data.bank,country:data.country,type:data.type,currency:data.currency,holder:data.holder,accountLast4:String(data.account).slice(-4),swift:data.swift||""})); showToast("Compte bancaire enregistré dans Think. La connexion bancaire réelle devra être autorisée.");});
+      const sandboxCreditForm=$("#walletSandboxCreditForm");
+      if(sandboxCreditForm) sandboxCreditForm.addEventListener("submit",async event=>{
+        event.preventDefault();
+        const button=sandboxCreditForm.querySelector('button[type="submit"]');
+        const values=Object.fromEntries(new FormData(sandboxCreditForm).entries());
+        button.disabled=true;
+        try{
+          await window.thinkApiRequest("/api/wallet/sandbox-credit",{
+            method:"POST",
+            body:JSON.stringify({amount:values.amount,currency:values.currency,reason:values.reason||"Crédit de test Sandbox"})
+          });
+          await window.thinkApiHydrate();
+          walletCurrency=values.currency;
+          localStorage.setItem("think-wallet-currency",walletCurrency);
+          updateWalletCurrencyUI();
+          showToast("Solde fictif ajouté au portefeuille Sandbox.");
+          render("balance");
+        }catch(error){
+          showToast(error.message||"Impossible d'ajouter le crédit de test.");
+          button.disabled=false;
+        }
+      });
       const cardForm=$("#walletCardForm");
       if(cardForm) cardForm.addEventListener("submit",event=>{event.preventDefault(); const data=Object.fromEntries(new FormData(cardForm).entries()); localStorage.setItem("think-card",JSON.stringify({holder:data.holder,country:data.country,brand:"Carte bancaire",last4:String(data.number).replace(/\D/g,"").slice(-4)})); showToast("Carte enregistrée de façon locale. Le stockage réel devra passer par un prestataire de paiement sécurisé.");});
       $$('[data-wallet-submit]').forEach(b=>b.addEventListener('click',()=>showToast(`${b.dataset.walletSubmit} : interface prête. Une connexion officielle sera nécessaire pour une opération réelle.`)));
