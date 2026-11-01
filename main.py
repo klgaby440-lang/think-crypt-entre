@@ -977,81 +977,192 @@ def read_all_notifications(db: Session = Depends(get_db), user: ThinkUser = Depe
 
 
 @app.get("/api/transfers")
-def transfers(authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-    return {"items": list(user["transfers"])}
+def transfers(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    rows = (
+        db.query(Transfer).filter(Transfer.user_id == user.id)
+        .order_by(Transfer.created_at.desc()).limit(100).all()
+    )
+    return {"items": [serialize_transfer(row) for row in rows]}
 
 
 @app.post("/api/transfers")
-def create_transfer(data: TransferData, authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-    transfer = add_transfer(
-        user,
+def create_transfer(
+    data: TransferData,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    currency = data.currency.upper()
+    if currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+
+    if idempotency_key:
+        existing = db.query(Transfer).filter(
+            Transfer.user_id == user.id, Transfer.idempotency_key == idempotency_key
+        ).first()
+        if existing:
+            return {"ok": True, "transfer": serialize_transfer(existing), "test_mode": True}
+
+    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount < Decimal("1.00"):
+        raise HTTPException(status_code=422, detail="Le montant minimum est de 1 unité.")
+
+    wallet_row = (
+        db.query(Wallet)
+        .filter(Wallet.user_id == user.id, Wallet.currency == currency)
+        .with_for_update()
+        .first()
+    )
+    if wallet_row is None:
+        raise HTTPException(status_code=404, detail="Portefeuille introuvable.")
+    if Decimal(wallet_row.available_balance) < amount:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Solde insuffisant. Disponible : {wallet_row.available_balance} {currency}.",
+        )
+
+    think_fee = (amount * THINK_FEE_RATE).quantize(CENT, rounding=ROUND_HALF_UP)
+    agency_fee = (
+        amount * AGENCY_FEE_RATES.get(data.agency_slug.lower(), Decimal("0.01"))
+    ).quantize(CENT, rounding=ROUND_HALF_UP)
+    received = max(Decimal("0"), amount - think_fee - agency_fee)
+    public_id = "THX-" + uuid4().hex[:16].upper()
+
+    # Sandbox request only: reserve the balance, do not claim a Mobile Money payout.
+    wallet_row.available_balance = Decimal(wallet_row.available_balance) - amount
+    wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) + amount
+
+    transfer = Transfer(
+        public_id=public_id,
+        user_id=user.id,
+        source_wallet_id=wallet_row.id,
         mode=data.mode,
         agency=data.agency,
-        agency_slug=data.agency_slug,
-        source_agency=data.source_agency,
-        source_agency_slug=data.source_agency_slug,
         recipient=data.recipient,
         beneficiary=data.beneficiary,
-        amount=data.amount,
-        currency=data.currency,
+        amount=amount,
+        think_fee=think_fee,
+        agency_fee=agency_fee,
+        received_amount=received,
+        currency=currency,
+        status="sandbox_pending",
+        idempotency_key=idempotency_key,
         reason=data.reason,
+        extra_data={"no_real_money_sent": True},
     )
-    return {"ok": True, "transfer": transfer, "user": user_public(user)}
+    db.add(transfer)
+    db.flush()
+    db.add(LedgerEntry(
+        wallet_id=wallet_row.id,
+        entry_type="TRANSFER_OUT",
+        amount=-amount,
+        currency=currency,
+        status="reserved",
+        reference=public_id,
+        related_type="transfer",
+        related_id=str(transfer.id),
+        description="Montant réservé pour une demande de transfert Sandbox.",
+        extra_data={"no_real_money_sent": True},
+    ))
+    notify_user(
+        db, user.id, "Demande de transfert préparée",
+        f"Demande Sandbox {public_id} : {amount} {currency} vers {data.agency}. "
+        "Aucun transfert Mobile Money réel n'a été effectué.",
+        "finance",
+    )
+    db.commit()
+    db.refresh(transfer)
+    return {
+        "ok": True, "transfer": serialize_transfer(transfer),
+        "test_mode": True, "no_real_money_sent": True,
+    }
 
 
 @app.get("/api/subscriptions")
-def subscription(authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-    return dict(user["subscription"])
+def subscription(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    row = (
+        db.query(Subscription).filter(Subscription.user_id == user.id)
+        .order_by(Subscription.created_at.desc()).first()
+    )
+    if row is None:
+        return {"plan": "", "status": "inactive", "expires_at": None, "test": True}
+    return {
+        "plan": row.plan,
+        "status": row.status,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "test": True,
+    }
 
 
 @app.post("/api/subscriptions/subscribe")
-def subscribe(data: SubscriptionData, authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
+def subscribe(
+    data: SubscriptionData,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
     expected = PLAN_PRICES_EUR.get(data.plan)
     if expected is None:
-        raise HTTPException(400, "Formule Think inconnue.")
-    if abs(float(data.amount) - expected) > 0.005:
-        raise HTTPException(400, f"Montant incorrect pour {data.plan}. Attendu : {expected:.2f} EUR.")
+        raise HTTPException(status_code=400, detail="Formule Think inconnue.")
+    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount != expected:
+        raise HTTPException(status_code=400, detail=f"Montant incorrect. Attendu : {expected:.2f} EUR.")
+    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
+        raise HTTPException(status_code=404, detail="Cette simulation est réservée au Sandbox.")
 
-    expires = datetime.now(timezone.utc) + timedelta(days=30)
-    user["subscription"] = {
-        "plan": data.plan,
-        "status": "active",
-        "expires_at": expires.isoformat(),
-        "test": True,
-        "payment_method": data.method,
-        "agency_slug": data.agency_slug,
+    row = Subscription(
+        user_id=user.id,
+        plan=data.plan,
+        status="pending_payment",
+        amount=amount,
+        currency="EUR",
+    )
+    db.add(row)
+    notify_user(
+        db, user.id, "Abonnement en attente",
+        f"La demande {data.plan} est enregistrée. Aucun paiement n'a été encaissé.",
+        "account",
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "status": "pending_payment",
+        "subscription": {"plan": data.plan, "status": "pending_payment", "test": True},
+        "message": "Demande Sandbox enregistrée. Aucun paiement réel n'a été effectué.",
     }
-    add_notification(user, "Abonnement activé", f"La formule {data.plan} a été activée sur le serveur de test.", "subscription")
-    return {"ok": True, "payment": {"status": "succeeded_test", "amount": expected, "currency": "EUR"}, "subscription": dict(user["subscription"]), "user": user_public(user)}
 
 
 @app.post("/api/payments/create")
-def create_payment(data: PaymentData, authorization: str | None = Header(default=None)):
-    global NEXT_PAYMENT_ID
-    user = current_user(authorization)
-    payment_id = f"TESTPAY-{NEXT_PAYMENT_ID}"
-    NEXT_PAYMENT_ID += 1
+def create_payment(
+    data: PaymentData,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    currency = data.currency.upper()
+    if currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+    row = PaymentTransaction(
+        public_id="PAY-" + uuid4().hex[:16].upper(),
+        user_id=user.id,
+        purpose=data.purpose,
+        amount=data.amount.quantize(CENT, rounding=ROUND_HALF_UP),
+        currency=currency,
+        provider="sandbox",
+        merchant_transaction_id="THINK-" + uuid4().hex[:20].upper(),
+        status="pending_sandbox",
+        provider_response={"test_mode": True, "no_real_payment": True},
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
     return {
-        "public_id": payment_id,
-        "status": "pending_test",
-        "amount": data.amount,
-        "currency": data.currency,
-        "purpose": data.purpose,
+        "public_id": row.public_id,
+        "status": row.status,
+        "amount": float(row.amount),
+        "currency": row.currency,
+        "purpose": row.purpose,
         "description": data.description,
-        "payment_url": f"/test-checkout/{payment_id}",
+        "payment_url": None,
         "test_mode": True,
-        "user": user["think_id"],
+        "no_real_payment": True,
+        "message": "Demande enregistrée. L'intégration CinetPay PAYIN sera ajoutée dans la phase suivante.",
     }
-
-
-@app.get("/test-checkout/{payment_id}", response_class=HTMLResponse)
-def fake_checkout(payment_id: str):
-    return HTMLResponse(f"""
-    <!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-    <title>Think · Checkout test</title><style>body{{font-family:system-ui;display:grid;place-items:center;min-height:100vh;background:#f5f3fb;color:#17171c}}main{{background:white;padding:30px;border-radius:22px;max-width:440px;box-shadow:0 20px 60px #0001}}code{{background:#f0eef8;padding:4px 7px;border-radius:7px}}</style></head>
-    <body><main><h1>Checkout Think — TEST</h1><p>Simulation locale du prestataire.</p><p>Référence : <code>{payment_id}</code></p><p>Aucun argent réel ne sera débité.</p><button onclick="history.back()">Retour à Think</button></main></body></html>
-    """)
