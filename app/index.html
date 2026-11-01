@@ -2202,7 +2202,10 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
 
   // Build absolute API URLs without hardcoding the host in every feature.
   window.thinkApiUrl = function (path) {
-    const normalizedPath = String(path || "").replace(/^\\/+/, "");
+    let normalizedPath = String(path || "");
+    while (normalizedPath.startsWith("/")) {
+      normalizedPath = normalizedPath.slice(1);
+    }
     return new URL(normalizedPath, window.THINK_API_BASE_URL + "/").toString();
   };
 </script>
