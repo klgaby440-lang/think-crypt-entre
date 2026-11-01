@@ -36,6 +36,7 @@ jobs:
 
           expected = {
               "think_users",
+              "user_profiles",
               "wallets",
               "ledger_entries",
               "payment_transactions",
