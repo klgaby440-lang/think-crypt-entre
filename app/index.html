@@ -2196,6 +2196,17 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
 .llink-notification-empty{margin-top:16px;padding:20px;border:1px dashed var(--line);border-radius:16px;color:var(--muted);text-align:center;background:color-mix(in srgb,var(--bg) 92%,var(--violet) 8%)}
 .llink-view-layer .llink-back-button{display:grid!important;place-items:center!important;visibility:visible!important;opacity:1!important}
 </style>
+<!-- Think API configuration (Render / Sandbox) -->
+<script>
+  window.THINK_API_BASE_URL = "https://think-crypt-entreprise.onrender.com";
+
+  // Build absolute API URLs without hardcoding the host in every feature.
+  window.thinkApiUrl = function (path) {
+    const normalizedPath = String(path || "").replace(/^\\/+/, "");
+    return new URL(normalizedPath, window.THINK_API_BASE_URL + "/").toString();
+  };
+</script>
+
 </head>
 
 
