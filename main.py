@@ -803,7 +803,7 @@ def health():
         "service": "think-api",
         "environment": os.getenv("APP_ENV", "sandbox"),
         "database": "connected",
-        "persistence": "schema-ready; legacy demo routes still use in-memory data",
+        "persistence": "PostgreSQL-backed accounts, wallets and sandbox requests",
     }
 
 
