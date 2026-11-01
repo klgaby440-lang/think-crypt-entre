@@ -26,6 +26,55 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q main.py
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate inline JavaScript
+        run: |
+          python - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          class InlineScripts(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.scripts = []
+                  self.current = None
+
+              def handle_starttag(self, tag, attrs):
+                  if tag.lower() == "script":
+                      attributes = dict(attrs)
+                      self.current = [] if "src" not in attributes else None
+
+              def handle_data(self, data):
+                  if self.current is not None:
+                      self.current.append(data)
+
+              def handle_endtag(self, tag):
+                  if tag.lower() == "script" and self.current is not None:
+                      source = "".join(self.current).strip()
+                      if source:
+                          self.scripts.append(source)
+                      self.current = None
+
+          parser = InlineScripts()
+          parser.feed(Path("app/index.html").read_text(encoding="utf-8"))
+          if not parser.scripts:
+              raise SystemExit("No inline scripts were found.")
+
+          with tempfile.TemporaryDirectory() as directory:
+              for index, source in enumerate(parser.scripts, start=1):
+                  path = Path(directory) / f"inline-{index}.js"
+                  path.write_text(source, encoding="utf-8")
+                  subprocess.run(["node", "--check", str(path)], check=True)
+
+          print(f"JavaScript syntax OK: {len(parser.scripts)} inline scripts.")
+          PY
+
       - name: Validate SQLAlchemy model mappings
         run: |
           python - <<'PY'
