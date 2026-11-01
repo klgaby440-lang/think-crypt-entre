@@ -3833,7 +3833,7 @@ function renderEmptyHistory(type) {
         const items=thinkGetTransfers().slice().reverse();
         if(items.length){
             historyContent.innerHTML=`<div class="think-record-list">${items.map(item=>{
-                const status=item.status === "completed_demo" ? "Effectué · démo locale" : (item.status === "prepared" ? "Opération préparée localement" : item.status);
+                const status=item.status === "sandbox_pending" ? "En attente · Sandbox" : (item.status === "completed_demo" ? "Effectué · démo locale" : (item.status === "prepared" ? "Opération préparée localement" : item.status));
                 return `<article class="think-record"><div class="think-record-top"><strong>${item.notificationText}</strong><span>${status}</span></div><div class="think-record-meta">${item.agency} · ${item.currency || "USD"}${item.reason ? ` · ${item.reason}` : ""}</div></article>`;
             }).join("")}</div>`;
         } else {
@@ -4426,8 +4426,7 @@ function renderTransactionForm(mode){
     const back=$("#txBackToAgency"); if(back) back.addEventListener("click",()=>{renderTransactionHome();applyLanguage();});
     const amountInput=$("#txAmount"), amountField=$("#txAmountField"), warning=$("#txAmountWarning"), currencyInput=$("#txCurrency"), icon=$("#txAmountAlertIcon"), feeLive=$("#txFeeLive"), continueButton=$("#txContinue");
     function availableAmount(code){
-        // Aucun solde réel avant connexion officielle : 0 dans toutes les devises.
-        return 0;
+        return Number(window.THINK_SERVER_STATE?.wallet?.balances?.[code] ?? 0);
     }
     function validate(){
         const raw=String(amountInput?.value??"").trim().replace(",",".");
@@ -4457,7 +4456,7 @@ function renderTransactionConfirmation(mode){
     const agency=transactionAgencies[selectedTransactionAgency];
     const amount=Number($("#txAmount")?.value||0), currency=$("#txCurrency")?.value||"CDF";
     const recipient=$("#txRecipient")?.value.trim()||"—", source=$("#txSourceAgency")?.value||"—", sourceAgency=transactionAgencies.find(a=>a.slug===source), beneficiary=$("#txBeneficiary")?.value.trim()||"Bénéficiaire non renseigné", reason=$("#txReason")?.value.trim()||"";
-    const thinkFee=thinkTransferFee(amount), agencyFee=thinkAgencyFee(amount,agency.slug), received=Math.max(0,amount-thinkFee-agencyFee), totalDebit=amount, available=0;
+    const thinkFee=thinkTransferFee(amount), agencyFee=thinkAgencyFee(amount,agency.slug), received=Math.max(0,amount-thinkFee-agencyFee), totalDebit=amount, available=Number(window.THINK_SERVER_STATE?.wallet?.balances?.[currency] ?? 0);
     /* Double verrou : la confirmation refuse aussi toute valeur < 1 ou non finie. */
     if(!Number.isFinite(amount) || amount<1 || totalDebit>available){renderTransactionForm(mode);const input=$("#txAmount");if(input){input.value=Number.isFinite(amount)?String(amount):"";input.dispatchEvent(new Event("input"));input.focus();}return;}
     const sourceLabel=mode==="other"&&sourceAgency?sourceAgency.name:"Compte Think";
@@ -4468,12 +4467,38 @@ function renderTransactionConfirmation(mode){
             <div class="tx-summary-row"><span>Depuis</span><span>${sourceLabel}</span></div><div class="tx-summary-row"><span>Vers</span><span>${agency.name}</span></div><div class="tx-summary-row"><span>Destinataire</span><span>${recipient}</span></div><div class="tx-summary-row"><span>Devise</span><span>${currency}</span></div><div class="tx-summary-row"><span>Montant saisi</span><span>${thinkMoney(amount,currency)}</span></div><div class="tx-summary-row tx-fee"><span>Frais Think (${(thinkTransferFeeRate(amount)*100).toFixed(2).replace(".00","")}%${localStorage.getItem("think-subscription-plan")?` · ${localStorage.getItem("think-subscription-plan")}`:""})</span><span>${thinkMoney(thinkFee,currency)}</span></div><div class="tx-summary-row tx-fee"><span>Frais ${agency.name}</span><span>${thinkMoney(agencyFee,currency)}</span></div><div class="tx-summary-row tx-total"><span>Total débité</span><span>${thinkMoney(totalDebit,currency)}</span></div><div class="tx-summary-row tx-total"><span>Montant envoyé après frais</span><span>${thinkMoney(received,currency)}</span></div>
         </div><button class="tx-primary" type="button" id="txConfirm">Confirmer le transfert</button><div class="tx-info">Vous allez envoyer ${thinkMoney(received,currency)} à ${recipient}. Confirmez que vous voulez que la transaction s'effectue.</div></div>`;
     $("#txBackToForm")?.addEventListener("click",()=>renderTransactionForm(mode));
-    $("#txConfirm")?.addEventListener("click",()=>{
-        const now=new Date(), stamp=now.toISOString(), dt=thinkFormatDateTime(stamp);
-        const record={id:Date.now(),status:"completed_demo",mode,agency:agency.name,agencySlug:agency.slug,sourceAgency:sourceAgency?.name||"Compte Think",recipient:recipient!=="—"?recipient:"numéro non renseigné",beneficiary,amount,currency,fee:thinkFee,agencyFee,total:totalDebit,received,reason,createdAt:stamp,date:dt.date,time:dt.time,notificationText:`Vous avez envoyé ${thinkMoney(received,currency)} le ${dt.date} à ${dt.time} à ${recipient!=="—"?recipient:"numéro non renseigné"}${beneficiary!=="Bénéficiaire non renseigné"?` (${beneficiary})`:""}. Frais Think : ${thinkMoney(thinkFee,currency)} · Frais ${agency.name} : ${thinkMoney(agencyFee,currency)}.`};
-        thinkAddTransfer(record);
-        main.innerHTML=`<div class="tx-empty" style="min-height:52dvh;"><div><div style="font-size:48px;line-height:1;margin-bottom:16px;">✓</div><div class="tx-selected-name">Transfert effectué dans la démo locale</div><div class="tx-selected-type" style="margin-top:7px;">${record.notificationText}</div><button class="tx-primary" type="button" id="txFinish" style="margin-top:20px;">Terminer</button></div></div>`;
-        $("#txFinish")?.addEventListener("click",()=>{renderTransactionHome();applyLanguage();});
+    $("#txConfirm")?.addEventListener("click",async event=>{
+        const button=event.currentTarget;
+        if(button.disabled) return;
+        button.disabled=true;
+        button.textContent="Enregistrement…";
+        const payload={
+            mode,
+            agency:agency.name,
+            agency_slug:agency.slug,
+            source_agency:sourceAgency?.name||"Compte Think",
+            source_agency_slug:sourceAgency?.slug||null,
+            recipient:recipient!=="—"?recipient:"numéro non renseigné",
+            beneficiary,
+            amount,
+            currency,
+            reason
+        };
+        try{
+            const result=await window.thinkApiRequest("/api/transfers",{
+                method:"POST",
+                headers:{"Idempotency-Key":"tx-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2))},
+                body:JSON.stringify(payload)
+            });
+            await window.thinkApiHydrate();
+            const record=result.transfer;
+            main.innerHTML=`<div class="tx-empty" style="min-height:52dvh;"><div><div style="font-size:48px;line-height:1;margin-bottom:16px;">✓</div><div class="tx-selected-name">Demande enregistrée en Sandbox</div><div class="tx-selected-type" style="margin-top:7px;">${record.notificationText}</div><div class="tx-info" style="margin-top:12px;">Le montant est réservé dans ton portefeuille. Aucun transfert Mobile Money réel n'a été effectué.</div><button class="tx-primary" type="button" id="txFinish" style="margin-top:20px;">Terminer</button></div></div>`;
+            $("#txFinish")?.addEventListener("click",()=>{renderTransactionHome();applyLanguage();});
+        }catch(error){
+            showToast(error.message||"Impossible d'enregistrer la demande.");
+            button.disabled=false;
+            button.textContent="Réessayer";
+        }
         applyLanguage();
     });
     applyLanguage();
