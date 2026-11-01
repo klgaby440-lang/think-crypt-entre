@@ -625,6 +625,7 @@ def health():
 
 @app.post("/api/auth/register")
 def register(data: RegisterData, db: Session = Depends(get_db)):
+    _jwt_secret()  # Fail before creating any rows if the signing secret is missing.
     email = data.email.strip().lower()
     if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
         raise HTTPException(status_code=422, detail="Adresse e-mail invalide.")
@@ -661,6 +662,7 @@ def register(data: RegisterData, db: Session = Depends(get_db)):
 
 @app.post("/api/auth/login")
 def login(data: Credentials, db: Session = Depends(get_db)):
+    _jwt_secret()
     email = data.email.strip().lower()
     user = db.query(ThinkUser).filter(
         ThinkUser.email == email, ThinkUser.is_active.is_(True)
