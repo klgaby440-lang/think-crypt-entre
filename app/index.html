@@ -5652,29 +5652,127 @@ function initProfileInterface(){
    PREMIÈRE OUVERTURE — CRÉATION DU COMPTE
    ========================================================= */
 function initThinkOnboarding(){
-  // Désactivé en phase prototype : l’inscription sera activée après connexion/authentification officielle de Think.
-  return;
-  if(localStorage.getItem("think-onboarding-complete")==="1") return;
   if(document.getElementById("thinkOnboarding")) return;
-  const overlay=document.createElement("div"); overlay.id="thinkOnboarding"; overlay.className="think-onboarding";
-  overlay.innerHTML=`<div class="think-onboarding-card"><div class="think-onboarding-brand">Think</div><div class="think-onboarding-step" id="onboardStep">1 / 4</div><h1 id="onboardTitle">Créer ton compte</h1><p id="onboardText">Avant d’utiliser Think, configure ton identité, tes coordonnées et les protections essentielles.</p><div id="onboardBody"></div><div class="think-onboarding-actions"><button class="profile-secondary-btn" type="button" id="onboardBack">Retour</button><button class="profile-primary-btn" type="button" id="onboardNext">Continuer</button></div></div>`;
-  document.body.appendChild(overlay);
-  const body=$("#onboardBody"), title=$("#onboardTitle"), text=$("#onboardText"), step=$("#onboardStep"), back=$("#onboardBack"), next=$("#onboardNext"); let i=0; const data={};
-  const ofield=(label,name,type="text",extra="")=>`<label class="profile-field"><span>${label}</span><input type="${type}" name="${name}" ${extra}></label>`;
-  const oselect=(label,name,value,options)=>`<label class="profile-field"><span>${label}</span><select name="${name}">${options.map(o=>`<option ${o===value?'selected':''}>${o}</option>`).join("")}</select></label>`;
-  const onote=(title,text)=>`<div class="profile-note"><strong>${title}</strong><span>${text}</span></div>`;
-  const steps=[
-    {title:"Créer ton compte",text:"Renseigne les informations nécessaires pour identifier ton compte.",html:`<div class="profile-onboard-grid">${field("Prénom","firstName","","text","required autocomplete=given-name")}${field("Nom","lastName","","text","required autocomplete=family-name")}${field("Nom d’utilisateur","username","","text","required autocomplete=username")}${field("Date de naissance","birthDate","","date","required")}</div>`},
-    {title:"Coordonnées et pays",text:"Ces informations servent à sécuriser le compte et adapter Think à ton pays.",html:`<div class="profile-onboard-grid">${field("Téléphone","phone","","tel","required autocomplete=tel")}${field("E-mail","email","","email","required autocomplete=email")}${select("Pays","country","RDC",["RDC","France","États-Unis","Royaume-Uni","Chine","Inde","Brésil","Autre"])}${select("Devise","currency","CDF",["CDF","USD","EUR","GBP","CNY","INR","BRL","SAR","RUB","BDT","IDR","TRY"])}</div>`},
-    {title:"Sécuriser le compte",text:"Choisis les protections qui seront utilisées pour les opérations sensibles.",html:`<div class="profile-onboard-grid">${field("Mot de passe","password","","password","required autocomplete=new-password")}${field("Code PIN","pin","","password","required inputmode=numeric minlength=4 maxlength=6 autocomplete=new-password placeholder=" + '"4 à 6 chiffres"')}${select("Biométrie","biometrics","À configurer",["À configurer","Activée","Désactivée"])}${select("Vérification en deux étapes","twoFactor","À configurer",["À configurer","Activée","Désactivée"])}</div>`},
-    {title:"Conditions et confidentialité",text:"Confirme que tu as lu les règles nécessaires avant de terminer la configuration.",html:`<label class="profile-check"><input type="checkbox" name="terms" required><span>J’accepte les Conditions d’utilisation et j’ai lu la Politique de confidentialité.</span></label><label class="profile-check"><input type="checkbox" name="security" required><span>Je comprends que les fonctions financières réelles nécessiteront des connexions et autorisations officielles.</span></label>${onote("Protection","Think ne doit pas afficher de faux soldes et les données sensibles devront être protégées dans la version connectée.")}`}
-  ];
-  function renderStep(){const st=data[i];step.textContent=`${i+1} / ${steps.length}`;title.textContent=st.title;text.textContent=st.text;body.innerHTML=st.html;back.style.visibility=i?"visible":"hidden";next.textContent=i===steps.length-1?"Créer mon compte":"Continuer";}
-  function collect(){body.querySelectorAll("input,select").forEach(el=>{if(el.type==='checkbox')data[el.name]=el.checked;else data[el.name]=el.value;});}
-  next.addEventListener("click",()=>{collect(); if(i<steps.length-1){const invalid=body.querySelector(":invalid");if(invalid){invalid.reportValidity();return;}i++;renderStep();return;} const invalid=body.querySelector(":invalid");if(invalid){invalid.reportValidity();return;} localStorage.setItem("think-profile",JSON.stringify({...data,accountCreated:true}));localStorage.setItem("think-onboarding-complete","1");overlay.remove();showToast("Compte Think créé localement. Les services réels devront être connectés séparément.");});
-  back.addEventListener("click",()=>{collect();if(i>0){i--;renderStep();}}); renderStep();
-}
 
+  const overlay=document.createElement("div");
+  overlay.id="thinkOnboarding";
+  overlay.className="think-onboarding";
+  Object.assign(overlay.style,{
+    position:"fixed",inset:"0",zIndex:"99999",display:"grid",placeItems:"center",
+    padding:"20px",background:"rgba(12,12,20,.68)",backdropFilter:"blur(12px)",
+    WebkitBackdropFilter:"blur(12px)"
+  });
+  overlay.innerHTML=`
+    <section class="think-onboarding-card" style="width:min(100%,460px);max-height:92dvh;overflow:auto;background:var(--card,#fff);color:var(--text,#17171c);border:1px solid var(--line,rgba(20,20,30,.12));border-radius:26px;padding:24px;box-shadow:0 25px 90px rgba(0,0,0,.25)">
+      <div class="think-onboarding-brand" style="font-size:28px;font-weight:850;letter-spacing:-1px">Think</div>
+      <div id="thinkAuthLoading" style="padding:28px 0;text-align:center">Vérification de ta session Think…</div>
+      <div id="thinkAuthContent" hidden>
+        <p style="color:var(--muted);margin:8px 0 18px">Connecte-toi à ton espace personnel. Environnement Sandbox : aucun argent réel n'est utilisé.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:18px">
+          <button type="button" id="thinkAuthRegisterTab" class="profile-secondary-btn">Créer un compte</button>
+          <button type="button" id="thinkAuthLoginTab" class="profile-secondary-btn">Se connecter</button>
+        </div>
+        <form id="thinkRegisterForm">
+          <label class="profile-field"><span>Nom complet</span><input name="full_name" required minlength="2" maxlength="120" autocomplete="name" placeholder="Ton nom complet"></label>
+          <label class="profile-field"><span>Téléphone</span><input name="phone" required minlength="3" maxlength="40" autocomplete="tel" placeholder="+243…"></label>
+          <label class="profile-field"><span>Adresse e-mail</span><input name="email" required type="email" maxlength="320" autocomplete="email" placeholder="nom@exemple.com"></label>
+          <label class="profile-field"><span>Mot de passe (8 caractères minimum)</span><input name="password" required type="password" minlength="8" maxlength="128" autocomplete="new-password"></label>
+          <label class="profile-field"><span>Pays</span><select name="country"><option>RDC</option><option>France</option><option>États-Unis</option><option>Royaume-Uni</option><option>Autre</option></select></label>
+          <label class="profile-field"><span>Devise principale</span><select name="currency"><option>CDF</option><option>USD</option><option>EUR</option><option>GBP</option></select></label>
+          <button class="profile-primary-btn" style="width:100%;margin-top:12px" type="submit">Créer mon compte Sandbox</button>
+        </form>
+        <form id="thinkLoginForm" hidden>
+          <label class="profile-field"><span>Adresse e-mail</span><input name="email" required type="email" maxlength="320" autocomplete="email"></label>
+          <label class="profile-field"><span>Mot de passe</span><input name="password" required type="password" minlength="8" maxlength="128" autocomplete="current-password"></label>
+          <button class="profile-primary-btn" style="width:100%;margin-top:12px" type="submit">Se connecter</button>
+        </form>
+        <div id="thinkAuthNotice" role="status" aria-live="polite" style="margin-top:14px;color:var(--muted);font-size:13px"></div>
+        <div style="font-size:12px;color:var(--muted);margin-top:16px;line-height:1.5">Les données de ce compte sont enregistrées dans l'environnement de test Think. Les dépôts, retraits et transferts réels ne sont pas activés.</div>
+      </div>
+    </section>`;
+  document.body.appendChild(overlay);
+
+  const loading=overlay.querySelector("#thinkAuthLoading");
+  const content=overlay.querySelector("#thinkAuthContent");
+  const registerForm=overlay.querySelector("#thinkRegisterForm");
+  const loginForm=overlay.querySelector("#thinkLoginForm");
+  const notice=overlay.querySelector("#thinkAuthNotice");
+  const registerTab=overlay.querySelector("#thinkAuthRegisterTab");
+  const loginTab=overlay.querySelector("#thinkAuthLoginTab");
+
+  function setMode(mode){
+    const isRegister=mode==="register";
+    registerForm.hidden=!isRegister;
+    loginForm.hidden=isRegister;
+    registerTab.classList.toggle("active",isRegister);
+    loginTab.classList.toggle("active",!isRegister);
+    notice.textContent="";
+  }
+  function showForms(mode="register",message=""){
+    loading.hidden=true;
+    content.hidden=false;
+    setMode(mode);
+    if(message) notice.textContent=message;
+  }
+  function finishAuth(result){
+    if(!result || !result.access_token) throw new Error("Le serveur n'a pas retourné de jeton de session.");
+    if(!window.thinkApiSetToken(result.access_token)) throw new Error("Impossible de conserver la session dans cet onglet.");
+    return window.thinkApiHydrate().then(()=>{
+      try{localStorage.setItem("think-onboarding-complete","1");}catch(_){}
+      overlay.remove();
+      if(typeof showToast==="function") showToast("Connexion à Think réussie.");
+      if(typeof updateHeader==="function") updateHeader();
+    });
+  }
+
+  registerTab.addEventListener("click",()=>setMode("register"));
+  loginTab.addEventListener("click",()=>setMode("login"));
+
+  registerForm.addEventListener("submit",async event=>{
+    event.preventDefault();
+    const button=registerForm.querySelector('button[type="submit"]');
+    button.disabled=true; notice.textContent="Création du compte…";
+    const values=Object.fromEntries(new FormData(registerForm).entries());
+    try{
+      const result=await window.thinkApiRequest("/api/auth/register",{
+        method:"POST",auth:false,body:JSON.stringify(values)
+      });
+      await finishAuth(result);
+    }catch(error){
+      notice.textContent=error.message||"Impossible de créer le compte.";
+    }finally{button.disabled=false;}
+  });
+
+  loginForm.addEventListener("submit",async event=>{
+    event.preventDefault();
+    const button=loginForm.querySelector('button[type="submit"]');
+    button.disabled=true; notice.textContent="Connexion…";
+    const values=Object.fromEntries(new FormData(loginForm).entries());
+    try{
+      const result=await window.thinkApiRequest("/api/auth/login",{
+        method:"POST",auth:false,body:JSON.stringify(values)
+      });
+      await finishAuth(result);
+    }catch(error){
+      window.thinkApiClearToken();
+      notice.textContent=error.message||"Connexion impossible.";
+    }finally{button.disabled=false;}
+  });
+
+  const token=window.thinkApiGetToken();
+  if(token){
+    window.thinkApiHydrate().then(()=>{
+      try{localStorage.setItem("think-onboarding-complete","1");}catch(_){}
+      overlay.remove();
+    }).catch(error=>{
+      window.thinkApiClearToken();
+      showForms("login","Session expirée ou serveur indisponible : "+(error.message||"reconnecte-toi."));
+    });
+  }else{
+    const hadProfile=!!localStorage.getItem("think-onboarding-complete");
+    showForms(hadProfile?"login":"register");
+  }
+}
 
 
 /* =========================================================
