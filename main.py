@@ -807,47 +807,173 @@ def health():
     }
 
 
-@app.post("/api/auth/login")
-def login(data: Credentials):
-    user = next((u for u in USERS.values() if u["email"].lower() == data.email.lower()), None)
-    if not user or user["password"] != data.password:
-        raise HTTPException(401, "E-mail ou mot de passe incorrect.")
-    return {"access_token": issue_token(user), "token_type": "bearer", "think_id": user["think_id"]}
-
-
 @app.post("/api/auth/register")
-def register(data: RegisterData):
-    if any(u["email"].lower() == data.email.lower() for u in USERS.values()):
-        raise HTTPException(409, "Un compte existe déjà avec cet e-mail.")
-    global NEXT_USER_ID
-    user = {
-        "id": NEXT_USER_ID,
-        "think_id": make_think_id(),
-        "email": data.email,
-        "password": hashless_test_password(data.password),
-        "full_name": data.full_name,
-        "phone": data.phone,
-        "created_at": now_iso(),
-        "balances": {"CDF": 0.0, "USD": 0.0, "EUR": 0.0, "GBP": 0.0, "CNY": 0.0, "INR": 0.0, "BRL": 0.0, "SAR": 0.0, "RUB": 0.0, "BDT": 0.0, "IDR": 0.0, "TRY": 0.0},
-        "subscription": {"plan": "", "status": "inactive", "expires_at": None, "test": True},
-        "transfers": [],
-        "notifications": [],
-    }
-    USERS[NEXT_USER_ID] = user
-    NEXT_USER_ID += 1
-    add_notification(user, "Bienvenue sur Think", "Ton compte de test a été créé.", "welcome")
-    return {"access_token": issue_token(user), "token_type": "bearer", "think_id": user["think_id"]}
+def register(data: RegisterData, db: Session = Depends(get_db)):
+    email = data.email.strip().lower()
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(status_code=422, detail="Adresse e-mail invalide.")
+    currency = data.currency.upper()
+    if currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+    if db.query(ThinkUser).filter(ThinkUser.email == email).first():
+        raise HTTPException(status_code=409, detail="Un compte existe déjà avec cet e-mail.")
+
+    user = ThinkUser(
+        think_id="THK-" + uuid4().hex[:12].upper(),
+        email=email,
+        password_hash=PASSWORD_HASHER.hash(data.password),
+        full_name=data.full_name.strip(),
+        phone=data.phone.strip(),
+    )
+    db.add(user)
+    try:
+        db.flush()
+        db.add(UserProfile(user_id=user.id, country=data.country.strip(), preferred_currency=currency))
+        for code in sorted(ALLOWED_CURRENCIES):
+            db.add(Wallet(
+                user_id=user.id, currency=code,
+                available_balance=Decimal("0"), reserved_balance=Decimal("0")
+            ))
+        notify_user(db, user.id, "Bienvenue sur Think", "Ton compte Sandbox est créé et relié à PostgreSQL.", "welcome")
+        db.commit()
+        db.refresh(user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Adresse e-mail déjà utilisée.")
+    return {"access_token": issue_access_token(user), "token_type": "bearer", "user": serialize_user(db, user)}
+
+
+@app.post("/api/auth/login")
+def login(data: Credentials, db: Session = Depends(get_db)):
+    email = data.email.strip().lower()
+    user = db.query(ThinkUser).filter(
+        ThinkUser.email == email, ThinkUser.is_active.is_(True)
+    ).first()
+    if user is None or not PASSWORD_HASHER.verify(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="E-mail ou mot de passe incorrect.")
+    return {"access_token": issue_access_token(user), "token_type": "bearer", "user": serialize_user(db, user)}
+
+
+@app.post("/api/auth/logout")
+def logout(user: ThinkUser = Depends(get_current_user)):
+    # Le client efface son jeton court; aucune opération financière n'est déclenchée ici.
+    return {"ok": True}
 
 
 @app.get("/api/me")
-def me(authorization: str | None = Header(default=None)):
-    return user_public(current_user(authorization))
+def me(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    return serialize_user(db, user)
+
+
+@app.patch("/api/profile")
+def update_profile(
+    data: ProfilePatch,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    values = data.model_dump(exclude_unset=True)
+    profile = user.profile
+    if profile is None:
+        profile = UserProfile(user_id=user.id)
+        db.add(profile)
+        db.flush()
+
+    phone = values.pop("phone", None)
+    if phone is not None:
+        user.phone = phone.strip()
+
+    preferences = values.pop("preferences", None)
+    if preferences is not None:
+        profile.preferences = {**(profile.preferences or {}), **preferences}
+
+    for key, value in values.items():
+        if hasattr(profile, key):
+            setattr(profile, key, value.strip() if isinstance(value, str) else value)
+
+    if profile.preferred_currency:
+        profile.preferred_currency = profile.preferred_currency.upper()
+        if profile.preferred_currency not in ALLOWED_CURRENCIES:
+            raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+
+    if profile.username:
+        profile.username = profile.username.strip().lower()
+
+    full_name = " ".join(x for x in [profile.first_name, profile.last_name] if x)
+    if full_name:
+        user.full_name = full_name[:120]
+
+    db.commit()
+    db.refresh(user)
+    return serialize_user(db, user)
 
 
 @app.get("/api/wallet")
-def wallet(authorization: str | None = Header(default=None)):
-    user = current_user(authorization)
-    return {"balances": dict(user["balances"]), "currency_count": len(user["balances"]), "test_mode": True}
+def wallet(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    rows = db.query(Wallet).filter(Wallet.user_id == user.id).order_by(Wallet.currency.asc()).all()
+    return {
+        "balances": {row.currency: float(row.available_balance) for row in rows},
+        "reserved_balances": {row.currency: float(row.reserved_balance) for row in rows},
+        "currency_count": len(rows),
+        "test_mode": True,
+    }
+
+
+@app.post("/api/wallet/sandbox-credit")
+def sandbox_credit(
+    data: SandboxCreditData,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
+        raise HTTPException(status_code=404, detail="Route disponible uniquement en Sandbox.")
+    currency = data.currency.upper()
+    if currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+    if data.amount > Decimal("100000000"):
+        raise HTTPException(status_code=422, detail="Montant de test trop élevé.")
+    row = (
+        db.query(Wallet)
+        .filter(Wallet.user_id == user.id, Wallet.currency == currency)
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Portefeuille introuvable.")
+    row.available_balance = Decimal(row.available_balance) + data.amount
+    reference = "SBX-" + uuid4().hex
+    db.add(LedgerEntry(
+        wallet_id=row.id, entry_type="DEPOSIT", amount=data.amount, currency=currency,
+        status="sandbox_confirmed", reference=reference,
+        description=data.reason, extra_data={"source": "sandbox_credit", "no_real_money": True},
+    ))
+    notify_user(
+        db, user.id, "Crédit de test ajouté",
+        f"{data.amount} {currency} ajoutés au portefeuille Sandbox. Aucun argent réel n'a été reçu.",
+        "finance",
+    )
+    db.commit()
+    return {
+        "ok": True, "test_mode": True, "no_real_money": True,
+        "balance": float(row.available_balance), "currency": currency,
+    }
+
+
+@app.get("/api/notifications")
+def notifications(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    rows = (
+        db.query(Notification).filter(Notification.user_id == user.id)
+        .order_by(Notification.created_at.desc()).limit(100).all()
+    )
+    return {"items": [serialize_notification(row) for row in rows]}
+
+
+@app.post("/api/notifications/read-all")
+def read_all_notifications(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    db.query(Notification).filter(
+        Notification.user_id == user.id, Notification.is_read.is_(False)
+    ).update({Notification.is_read: True}, synchronize_session=False)
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/transfers")
