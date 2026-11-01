@@ -1,0 +1,54 @@
+name: Think backend validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python
+        run: python -m compileall -q main.py
+
+      - name: Validate SQLAlchemy model mappings
+        run: |
+          python - <<'PY'
+          import main
+          from sqlalchemy.orm import configure_mappers
+
+          configure_mappers()
+
+          expected = {
+              "think_users",
+              "wallets",
+              "ledger_entries",
+              "payment_transactions",
+              "withdrawals",
+              "transfers",
+              "subscriptions",
+              "notifications",
+          }
+          actual = set(main.Base.metadata.tables)
+          missing = expected - actual
+          if missing:
+              raise SystemExit(f"Missing tables: {sorted(missing)}")
+
+          print("SQLAlchemy mappings OK.")
+          print("Tables:", ", ".join(sorted(actual)))
+          PY
