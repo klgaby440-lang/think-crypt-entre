@@ -637,6 +637,13 @@ class SandboxCreditData(BaseModel):
     reason: str = Field(default="Crédit de test Sandbox", max_length=200)
 
 
+class WithdrawalData(BaseModel):
+    amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(min_length=3, max_length=3)
+    operator: str = Field(min_length=2, max_length=32)
+    phone: str = Field(min_length=6, max_length=40)
+
+
 ALLOWED_CURRENCIES = {
     "CDF", "USD", "EUR", "GBP", "CNY", "INR",
     "BRL", "SAR", "RUB", "BDT", "IDR", "TRY",
@@ -985,6 +992,118 @@ def read_all_notifications(db: Session = Depends(get_db), user: ThinkUser = Depe
     ).update({Notification.is_read: True}, synchronize_session=False)
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/withdrawals")
+def withdrawals(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
+    rows = (
+        db.query(Withdrawal).filter(Withdrawal.user_id == user.id)
+        .order_by(Withdrawal.created_at.desc()).limit(100).all()
+    )
+    return {
+        "items": [
+            {
+                "public_id": row.public_id,
+                "status": row.status,
+                "operator": row.operator,
+                "phone": row.phone,
+                "amount": float(row.amount),
+                "fee": float(row.fee),
+                "net_amount": float(row.net_amount),
+                "currency": row.currency,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/withdrawals")
+def create_withdrawal(
+    data: WithdrawalData,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
+        raise HTTPException(status_code=404, detail="Les demandes de retrait Sandbox sont désactivées hors Sandbox.")
+
+    currency = data.currency.upper()
+    if currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount < Decimal("1.00"):
+        raise HTTPException(status_code=422, detail="Le montant minimum est de 1 unité.")
+
+    wallet_row = (
+        db.query(Wallet)
+        .filter(Wallet.user_id == user.id, Wallet.currency == currency)
+        .with_for_update()
+        .first()
+    )
+    if wallet_row is None:
+        raise HTTPException(status_code=404, detail="Portefeuille introuvable.")
+    if Decimal(wallet_row.available_balance) < amount:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Solde insuffisant. Disponible : {wallet_row.available_balance} {currency}.",
+        )
+
+    fee = (amount * THINK_FEE_RATE).quantize(CENT, rounding=ROUND_HALF_UP)
+    net_amount = amount - fee
+    public_id = "WDR-" + uuid4().hex[:16].upper()
+
+    wallet_row.available_balance = Decimal(wallet_row.available_balance) - amount
+    wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) + amount
+    row = Withdrawal(
+        public_id=public_id,
+        user_id=user.id,
+        wallet_id=wallet_row.id,
+        amount=amount,
+        fee=fee,
+        net_amount=net_amount,
+        currency=currency,
+        operator=data.operator.strip(),
+        phone=data.phone.strip(),
+        status="sandbox_pending",
+        provider_response={"test_mode": True, "no_real_payout": True},
+    )
+    db.add(row)
+    db.flush()
+    db.add(LedgerEntry(
+        wallet_id=wallet_row.id,
+        entry_type="WITHDRAWAL",
+        amount=-amount,
+        currency=currency,
+        status="reserved",
+        reference=public_id,
+        related_type="withdrawal",
+        related_id=str(row.id),
+        description="Montant réservé pour une demande de retrait Sandbox.",
+        extra_data={"no_real_payout": True},
+    ))
+    notify_user(
+        db, user.id, "Demande de retrait enregistrée",
+        f"Demande Sandbox {public_id} : {amount} {currency} vers {data.operator}. "
+        "Aucun paiement Mobile Money réel n'a été envoyé.",
+        "finance",
+    )
+    db.commit()
+    db.refresh(row)
+    return {
+        "ok": True,
+        "withdrawal": {
+            "public_id": row.public_id,
+            "status": row.status,
+            "operator": row.operator,
+            "phone": row.phone,
+            "amount": float(row.amount),
+            "fee": float(row.fee),
+            "net_amount": float(row.net_amount),
+            "currency": row.currency,
+        },
+        "test_mode": True,
+        "no_real_payout": True,
+    }
 
 
 @app.get("/api/transfers")
