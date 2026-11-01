@@ -3448,6 +3448,24 @@ const THINK_NOTIFICATION_KEY = "think-notification-items";
 function thinkGetTransfers(){
     try { return JSON.parse(localStorage.getItem(THINK_TRANSFER_KEY) || "[]"); } catch(e){ return []; }
 }
+function thinkGetMovementRecords(){
+    const server=window.THINK_SERVER_STATE||{};
+    const transfers=(server.transfers?.items||thinkGetTransfers()).map(item=>({
+      ...item,
+      movementType:"Transfert",
+      movementLabel:item.notificationText||`Transfert vers ${item.agency||"destinataire"}`,
+      movementDate:item.createdAt||item.created_at||""
+    }));
+    const withdrawals=(server.withdrawals?.items||[]).map(item=>({
+      ...item,
+      movementType:"Retrait",
+      agency:`Retrait · ${item.operator||"opérateur"}`,
+      notificationText:`Demande de retrait de ${item.amount} ${item.currency} vers ${item.operator||"opérateur"} · ${item.phone||""}`,
+      movementLabel:`Demande de retrait de ${item.amount} ${item.currency} vers ${item.operator||"opérateur"}`,
+      movementDate:item.created_at||item.createdAt||""
+    }));
+    return [...transfers,...withdrawals].sort((a,b)=>Date.parse(b.movementDate||0)-Date.parse(a.movementDate||0));
+}
 function thinkSaveTransfers(items){ localStorage.setItem(THINK_TRANSFER_KEY, JSON.stringify(items.slice(-100))); }
 function thinkGetNotifications(){
     try { return JSON.parse(localStorage.getItem(THINK_NOTIFICATION_KEY) || "[]"); } catch(e){ return []; }
@@ -3845,11 +3863,11 @@ const historyContent =
 function renderEmptyHistory(type) {
 
     if (type === "transactions") {
-        const items=thinkGetTransfers().slice().reverse();
+        const items=thinkGetMovementRecords();
         if(items.length){
             historyContent.innerHTML=`<div class="think-record-list">${items.map(item=>{
                 const status=item.status === "sandbox_pending" ? "En attente · Sandbox" : (item.status === "completed_demo" ? "Effectué · démo locale" : (item.status === "prepared" ? "Opération préparée localement" : item.status));
-                return `<article class="think-record"><div class="think-record-top"><strong>${item.notificationText}</strong><span>${status}</span></div><div class="think-record-meta">${item.agency} · ${item.currency || "USD"}${item.reason ? ` · ${item.reason}` : ""}</div></article>`;
+                return `<article class="think-record"><div class="think-record-top"><strong>${item.movementLabel||item.notificationText}</strong><span>${status}</span></div><div class="think-record-meta">${item.agency||item.operator||item.movementType} · ${item.currency || "USD"}${item.reason ? ` · ${item.reason}` : ""}</div></article>`;
             }).join("")}</div>`;
         } else {
             historyContent.innerHTML=`<div class="empty-icon" aria-hidden="true">↗</div><div class="empty-title">Aucun transfert</div><div class="empty-text">Les transferts d'argent envoyés et l'argent reçu apparaîtront ici.</div>`;
@@ -5529,9 +5547,9 @@ console.log(
 
 function renderThinkMovementList(targetId, emptyText="Aucun mouvement enregistré."){
     const target=$(targetId); if(!target) return;
-    const items=thinkGetTransfers().slice().reverse();
+    const items=thinkGetMovementRecords();
     if(!items.length){ target.innerHTML=`<div class="budget-detail-card-sub" style="padding:12px 0">${emptyText}</div>`; return; }
-    target.innerHTML=`<div class="think-record-list">${items.slice(0,8).map(item=>`<article class="think-record"><div class="think-record-top"><strong>${item.notificationText}</strong><span>${item.status === "sandbox_pending" ? "En attente · Sandbox" : (item.status === "completed_demo" ? "Effectué · démo" : (item.status === "prepared" ? "Préparé" : item.status))}</span></div><div class="think-record-meta">${item.agency} · ${item.currency || "USD"}</div></article>`).join("")}</div>`;
+    target.innerHTML=`<div class="think-record-list">${items.slice(0,8).map(item=>`<article class="think-record"><div class="think-record-top"><strong>${item.movementLabel||item.notificationText}</strong><span>${item.status === "sandbox_pending" ? "En attente · Sandbox" : (item.status === "completed_demo" ? "Effectué · démo" : (item.status === "prepared" ? "Préparé" : item.status))}</span></div><div class="think-record-meta">${item.agency||item.operator||item.movementType} · ${item.currency || "USD"}</div></article>`).join("")}</div>`;
 }
 
 /* =========================================================
