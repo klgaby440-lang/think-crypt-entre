@@ -2260,6 +2260,15 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
       localStorage.setItem("think-transfer-history", JSON.stringify(transfers.items || []));
       localStorage.setItem("think-notification-items", JSON.stringify(notifications.items || []));
       localStorage.setItem("think-subscription-server", JSON.stringify(subscription || {}));
+      if (subscription && subscription.status === "active" && subscription.plan) {
+        localStorage.setItem("think-subscription-plan", subscription.plan);
+        localStorage.setItem("think-subscription-status", "verified");
+        if (subscription.expires_at) localStorage.setItem("think-subscription-expires", String(Date.parse(subscription.expires_at)));
+      } else {
+        localStorage.removeItem("think-subscription-plan");
+        localStorage.removeItem("think-subscription-status");
+        localStorage.removeItem("think-subscription-expires");
+      }
       const profile = me.profile || {};
       localStorage.setItem("think-profile", JSON.stringify({
         firstName: profile.first_name || (me.full_name || "").split(" ")[0] || "",
@@ -3466,6 +3475,10 @@ function thinkMarkAllNotificationsRead(){
     const items=thinkGetNotifications().map(n=>({...n,read:true}));
     thinkSaveNotifications(items);
     const dot=document.querySelector('.notification-dot'); if(dot) dot.classList.remove('has-new');
+    if(window.thinkApiGetToken && window.thinkApiGetToken()){
+      window.thinkApiRequest("/api/notifications/read-all",{method:"POST"})
+        .catch(error=>console.warn("Synchronisation des notifications impossible:",error));
+    }
 }
 function thinkMaybeAddModerateInsight(){
     if(!state.notifications) return;
@@ -5516,7 +5529,7 @@ function renderThinkMovementList(targetId, emptyText="Aucun mouvement enregistr�
     const target=$(targetId); if(!target) return;
     const items=thinkGetTransfers().slice().reverse();
     if(!items.length){ target.innerHTML=`<div class="budget-detail-card-sub" style="padding:12px 0">${emptyText}</div>`; return; }
-    target.innerHTML=`<div class="think-record-list">${items.slice(0,8).map(item=>`<article class="think-record"><div class="think-record-top"><strong>${item.notificationText}</strong><span>${item.status === "completed_demo" ? "Effectué · démo" : (item.status === "prepared" ? "Préparé" : item.status)}</span></div><div class="think-record-meta">${item.agency} · ${item.currency || "USD"}</div></article>`).join("")}</div>`;
+    target.innerHTML=`<div class="think-record-list">${items.slice(0,8).map(item=>`<article class="think-record"><div class="think-record-top"><strong>${item.notificationText}</strong><span>${item.status === "sandbox_pending" ? "En attente · Sandbox" : (item.status === "completed_demo" ? "Effectué · démo" : (item.status === "prepared" ? "Préparé" : item.status))}</span></div><div class="think-record-meta">${item.agency} · ${item.currency || "USD"}</div></article>`).join("")}</div>`;
 }
 
 /* =========================================================
