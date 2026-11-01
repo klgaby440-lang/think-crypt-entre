@@ -576,58 +576,207 @@ def shutdown_database():
 # ---------------------------------------------------------------------------
 
 class Credentials(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class RegisterData(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
     phone: str = Field(min_length=3, max_length=40)
-    email: str
+    email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=128)
+    country: str = Field(default="RDC", max_length=80)
+    currency: str = Field(default="CDF", min_length=3, max_length=3)
+
+
+class ProfilePatch(BaseModel):
+    username: str | None = Field(default=None, min_length=3, max_length=40)
+    first_name: str | None = Field(default=None, max_length=80)
+    last_name: str | None = Field(default=None, max_length=80)
+    birth_date: str | None = Field(default=None, max_length=10)
+    country: str | None = Field(default=None, max_length=80)
+    preferred_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    address: str | None = Field(default=None, max_length=200)
+    city: str | None = Field(default=None, max_length=100)
+    postal_code: str | None = Field(default=None, max_length=24)
+    phone: str | None = Field(default=None, max_length=40)
+    preferences: dict[str, Any] | None = None
 
 
 class TransferData(BaseModel):
-    mode: str = "same"
-    agency: str
-    agency_slug: str
-    source_agency: str = "Compte Think"
-    source_agency_slug: str | None = None
-    recipient: str
-    beneficiary: str = "Bénéficiaire non renseigné"
-    amount: float
-    currency: str
-    reason: str = ""
+    mode: str = Field(default="same", max_length=24)
+    agency: str = Field(min_length=2, max_length=80)
+    agency_slug: str = Field(min_length=2, max_length=40)
+    source_agency: str = Field(default="Compte Think", max_length=80)
+    source_agency_slug: str | None = Field(default=None, max_length=40)
+    recipient: str = Field(min_length=2, max_length=80)
+    beneficiary: str = Field(default="Bénéficiaire non renseigné", max_length=120)
+    amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(min_length=3, max_length=3)
+    reason: str = Field(default="", max_length=500)
 
 
 class SubscriptionData(BaseModel):
-    plan: str
-    amount: float
-    method: str = "mobile"
-    agency_slug: str | None = None
+    plan: str = Field(min_length=2, max_length=40)
+    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    method: str = Field(default="mobile", max_length=24)
+    agency_slug: str | None = Field(default=None, max_length=40)
 
 
 class PaymentData(BaseModel):
-    purpose: str = "subscription"
-    amount: float
-    currency: str = "EUR"
-    description: str = "Paiement Think"
+    purpose: str = Field(default="wallet_deposit", max_length=40)
+    amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(default="CDF", min_length=3, max_length=3)
+    description: str = Field(default="Paiement Think", max_length=200)
 
 
-def current_user(authorization: str | None) -> dict[str, Any]:
+class SandboxCreditData(BaseModel):
+    amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(min_length=3, max_length=3)
+    reason: str = Field(default="Crédit de test Sandbox", max_length=200)
+
+
+ALLOWED_CURRENCIES = {
+    "CDF", "USD", "EUR", "GBP", "CNY", "INR",
+    "BRL", "SAR", "RUB", "BDT", "IDR", "TRY",
+}
+PLAN_PRICES_EUR = {
+    "Standard": Decimal("2.99"),
+    "Intermédiaire": Decimal("6.99"),
+    "Premium": Decimal("14.99"),
+}
+THINK_FEE_RATE = Decimal("0.03")
+AGENCY_FEE_RATES = {
+    "orange": Decimal("0.010"), "airtel": Decimal("0.012"),
+    "mpesa": Decimal("0.010"), "mtn": Decimal("0.011"),
+    "wise": Decimal("0.008"), "westernunion": Decimal("0.015"),
+    "moneygram": Decimal("0.014"), "remitly": Decimal("0.012"),
+    "xoom": Decimal("0.012"), "alipay": Decimal("0.008"),
+    "wechat": Decimal("0.008"), "paytm": Decimal("0.010"),
+}
+CENT = Decimal("0.01")
+
+
+def get_db():
+    if SessionLocal is None:
+        raise HTTPException(status_code=503, detail="Database is not ready.")
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _jwt_secret() -> str:
+    value = os.getenv("JWT_SECRET", "").strip()
+    if len(value) < 32:
+        raise HTTPException(status_code=503, detail="JWT_SECRET must be configured in Render (minimum 32 characters).")
+    return value
+
+
+def issue_access_token(user: ThinkUser) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "iat": now,
+        "exp": now + timedelta(hours=24),
+        "iss": "think-api",
+        "aud": "think-app",
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm="HS256")
+
+
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> ThinkUser:
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "Authentification requise.")
+        raise HTTPException(status_code=401, detail="Authentification requise.")
     token = authorization.split(" ", 1)[1].strip()
-    user_id = TOKENS.get(token)
-    if not user_id or user_id not in USERS:
-        raise HTTPException(401, "Session Think invalide ou expirée.")
-    return USERS[user_id]
+    try:
+        payload = jwt.decode(
+            token, _jwt_secret(), algorithms=["HS256"],
+            issuer="think-api", audience="think-app",
+            options={"require": ["sub", "exp", "iat"]},
+        )
+        user_id = int(payload["sub"])
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Session Think invalide ou expirée.")
+    user = db.query(ThinkUser).filter(
+        ThinkUser.id == user_id, ThinkUser.is_active.is_(True)
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Compte Think introuvable ou désactivé.")
+    return user
 
 
-def issue_token(user: dict[str, Any]) -> str:
-    token = "test_" + token_urlsafe(24)
-    TOKENS[token] = user["id"]
-    return token
+def notify_user(db: Session, user_id: int, title: str, body: str, category: str = "info"):
+    db.add(Notification(user_id=user_id, title=title, body=body, category=category))
+
+
+def serialize_notification(item: Notification) -> dict[str, Any]:
+    return {
+        "id": item.id, "title": item.title, "text": item.body,
+        "category": item.category, "read": item.is_read,
+        "createdAt": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def serialize_transfer(item: Transfer) -> dict[str, Any]:
+    created = item.created_at.isoformat() if item.created_at else None
+    message = (
+        f"Demande Sandbox de {item.amount} {item.currency} vers {item.agency}. "
+        "Aucun transfert Mobile Money réel n'a été effectué."
+    )
+    return {
+        "id": item.id, "publicId": item.public_id, "status": item.status,
+        "mode": item.mode, "agency": item.agency,
+        "agencySlug": item.agency.lower().replace(" ", ""),
+        "sourceAgency": "Compte Think", "sourceAgencySlug": None,
+        "recipient": item.recipient, "beneficiary": item.beneficiary or "",
+        "amount": float(item.amount), "currency": item.currency,
+        "fee": float(item.think_fee), "agencyFee": float(item.agency_fee),
+        "total": float(item.amount), "received": float(item.received_amount),
+        "reason": item.reason or "", "createdAt": created,
+        "date": item.created_at.strftime("%d/%m/%Y") if item.created_at else "",
+        "time": item.created_at.strftime("%H:%M") if item.created_at else "",
+        "notificationText": message,
+    }
+
+
+def serialize_user(db: Session, user: ThinkUser) -> dict[str, Any]:
+    profile = user.profile
+    wallets = db.query(Wallet).filter(Wallet.user_id == user.id).all()
+    subscription = (
+        db.query(Subscription).filter(Subscription.user_id == user.id)
+        .order_by(Subscription.created_at.desc()).first()
+    )
+    return {
+        "id": user.id, "think_id": user.think_id, "email": user.email,
+        "full_name": user.full_name, "phone": user.phone or "",
+        "profile": {
+            "username": profile.username if profile else "",
+            "first_name": profile.first_name if profile else "",
+            "last_name": profile.last_name if profile else "",
+            "birth_date": profile.birth_date if profile else "",
+            "country": profile.country if profile else "RDC",
+            "currency": profile.preferred_currency if profile else "CDF",
+            "address": profile.address if profile else "",
+            "city": profile.city if profile else "",
+            "postal_code": profile.postal_code if profile else "",
+            "preferences": profile.preferences if profile else {},
+        },
+        "balances": {w.currency: float(w.available_balance) for w in wallets},
+        "reserved_balances": {w.currency: float(w.reserved_balance) for w in wallets},
+        "subscription": {
+            "plan": subscription.plan if subscription else "",
+            "status": subscription.status if subscription else "inactive",
+            "expires_at": subscription.expires_at.isoformat() if subscription and subscription.expires_at else None,
+            "test": True,
+        },
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "test_mode": True,
+    }
 
 
 # ---------------------------------------------------------------------------
