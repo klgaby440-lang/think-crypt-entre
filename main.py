@@ -13,6 +13,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     Column,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -33,16 +34,23 @@ import re
 logger = logging.getLogger("think.database")
 
 # ---------------------------------------------------------------------------
-# PostgreSQL / SQLAlchemy
+# PostgreSQL / SQLAlchemy — Phase 1 and Phase 2
 #
-# THINK_BOOTSTRAP_ADMIN_DATABASE_URL : Internal Database URL of the existing
-# Render PostgreSQL instance (currently ClassNet's database). It is used only
-# to check/create the separate think_db database.
+# Required:
+#   THINK_DATABASE_URL: internal URL using a Think-only Render credential,
+#                       pointing to /think_db.
 #
-# THINK_DATABASE_NAME : target database name (default: think_db).
+# Optional, FIRST BOOTSTRAP ONLY:
+#   THINK_DATABASE_ADMIN_URL: same Think-only credential and same PostgreSQL
+#                             instance, pointing to /postgres. It is used to
+#                             create think_db if it does not exist.
+#
+# After think_db has been created, remove THINK_DATABASE_ADMIN_URL from
+# Render. The application then connects only to THINK_DATABASE_URL.
 # ---------------------------------------------------------------------------
 
 Base = declarative_base()
+database_engine = None
 
 
 class ThinkUser(Base):
@@ -54,17 +62,23 @@ class ThinkUser(Base):
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(120), nullable=False)
     phone = Column(String(40), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     wallets = relationship("Wallet", back_populates="user", cascade="all, delete-orphan")
     payments = relationship("PaymentTransaction", back_populates="user")
     withdrawals = relationship("Withdrawal", back_populates="user")
+    transfers = relationship("Transfer", back_populates="user")
+    subscriptions = relationship("Subscription", back_populates="user")
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
 
 
 class Wallet(Base):
     __tablename__ = "wallets"
     __table_args__ = (
         UniqueConstraint("user_id", "currency", name="uq_wallet_user_currency"),
+        CheckConstraint("available_balance >= 0", name="ck_wallet_available_nonnegative"),
+        CheckConstraint("reserved_balance >= 0", name="ck_wallet_reserved_nonnegative"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -83,11 +97,13 @@ class LedgerEntry(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     wallet_id = Column(Integer, ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=False, index=True)
-    entry_type = Column(String(32), nullable=False)  # DEPOSIT, WITHDRAWAL, FEE, REVERSAL, etc.
+    entry_type = Column(String(32), nullable=False)
     amount = Column(Numeric(20, 2), nullable=False)
     currency = Column(String(3), nullable=False)
     status = Column(String(24), nullable=False, default="pending")
     reference = Column(String(128), nullable=True, unique=True, index=True)
+    related_type = Column(String(32), nullable=True)
+    related_id = Column(String(64), nullable=True)
     description = Column(Text, nullable=True)
     extra_data = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -107,6 +123,7 @@ class PaymentTransaction(Base):
     provider = Column(String(32), nullable=False, default="cinetpay")
     merchant_transaction_id = Column(String(64), nullable=False, unique=True, index=True)
     provider_transaction_id = Column(String(128), nullable=True, index=True)
+    idempotency_key = Column(String(128), nullable=True, unique=True)
     status = Column(String(32), nullable=False, default="pending")
     payment_url = Column(Text, nullable=True)
     provider_response = Column(JSON, nullable=True)
@@ -139,6 +156,64 @@ class Withdrawal(Base):
     wallet = relationship("Wallet")
 
 
+class Transfer(Base):
+    __tablename__ = "transfers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String(64), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    source_wallet_id = Column(Integer, ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=True, index=True)
+    mode = Column(String(24), nullable=False, default="same")
+    agency = Column(String(80), nullable=False)
+    recipient = Column(String(80), nullable=True)
+    beneficiary = Column(String(120), nullable=True)
+    amount = Column(Numeric(20, 2), nullable=False)
+    think_fee = Column(Numeric(20, 2), nullable=False, default=0)
+    agency_fee = Column(Numeric(20, 2), nullable=False, default=0)
+    received_amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    idempotency_key = Column(String(128), nullable=True, unique=True)
+    reason = Column(Text, nullable=True)
+    extra_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="transfers")
+    source_wallet = relationship("Wallet")
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    plan = Column(String(40), nullable=False)
+    status = Column(String(24), nullable=False, default="pending")
+    amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="EUR")
+    payment_transaction_id = Column(Integer, ForeignKey("payment_transactions.id", ondelete="SET NULL"), nullable=True)
+    starts_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="subscriptions")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(160), nullable=False)
+    body = Column(Text, nullable=False)
+    category = Column(String(32), nullable=False, default="info")
+    is_read = Column(Boolean, nullable=False, default=False)
+    extra_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="notifications")
+
+
 def _sqlalchemy_url(raw_url: str):
     url = make_url(raw_url)
     if url.drivername in {"postgres", "postgresql"}:
@@ -147,60 +222,111 @@ def _sqlalchemy_url(raw_url: str):
 
 
 def initialize_database():
-    """Create the isolated Think database (if missing) and its ORM tables."""
-    admin_raw_url = os.getenv("THINK_BOOTSTRAP_ADMIN_DATABASE_URL")
-    if not admin_raw_url:
+    """Create Think's separate database (optional bootstrap) and its ORM tables."""
+    think_raw_url = os.getenv("THINK_DATABASE_URL")
+    if not think_raw_url:
         raise RuntimeError(
-            "Missing THINK_BOOTSTRAP_ADMIN_DATABASE_URL. Set it to the "
-            "Internal Database URL of the existing Render PostgreSQL instance."
+            "THINK_DATABASE_URL is missing. Set it to the Internal Database URL "
+            "for the dedicated Think PostgreSQL credential and the think_db database."
         )
 
+    think_url = _sqlalchemy_url(think_raw_url)
     database_name = os.getenv("THINK_DATABASE_NAME", "think_db").strip()
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", database_name):
         raise RuntimeError("THINK_DATABASE_NAME must be a simple PostgreSQL identifier.")
 
-    admin_url = _sqlalchemy_url(admin_raw_url)
-    admin_engine = create_engine(
-        admin_url,
-        isolation_level="AUTOCOMMIT",
-        pool_pre_ping=True,
-        connect_args={"connect_timeout": 10},
-    )
-    try:
-        with admin_engine.connect() as connection:
-            exists = connection.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :database_name"),
-                {"database_name": database_name},
-            ).scalar_one_or_none()
+    if think_url.database != database_name:
+        raise RuntimeError(
+            f"THINK_DATABASE_URL points to database '{think_url.database}', "
+            f"but THINK_DATABASE_NAME is '{database_name}'. Use the think_db URL."
+        )
 
-            if exists is None:
-                connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
-                logger.info("Created PostgreSQL database %s", database_name)
-            else:
-                logger.info("PostgreSQL database %s already exists", database_name)
-    finally:
-        admin_engine.dispose()
+    admin_raw_url = os.getenv("THINK_DATABASE_ADMIN_URL")
+    if admin_raw_url:
+        admin_url = _sqlalchemy_url(admin_raw_url)
+        if (admin_url.host, admin_url.port, admin_url.username) != (
+            think_url.host, think_url.port, think_url.username
+        ):
+            raise RuntimeError(
+                "THINK_DATABASE_ADMIN_URL and THINK_DATABASE_URL must use the "
+                "same Render PostgreSQL instance and the same dedicated Think user."
+            )
 
-    think_url = admin_url.set(database=database_name)
+        # Connect to the maintenance database, not to ClassNet's database.
+        admin_url = admin_url.set(database="postgres")
+        admin_engine = create_engine(
+            admin_url,
+            isolation_level="AUTOCOMMIT",
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+            connect_args={"connect_timeout": 10},
+        )
+        try:
+            with admin_engine.connect() as connection:
+                exists = connection.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :database_name"),
+                    {"database_name": database_name},
+                ).scalar_one_or_none()
+
+                if exists is None:
+                    owner_name = connection.execute(text("SELECT current_user")).scalar_one()
+                    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
+                    quoted_owner = admin_engine.dialect.identifier_preparer.quote(owner_name)
+                    connection.exec_driver_sql(
+                        f"CREATE DATABASE {quoted_database} OWNER {quoted_owner}"
+                    )
+                    logger.info("Created Think database '%s' owned by its dedicated role.", database_name)
+                else:
+                    logger.info("Think database '%s' already exists.", database_name)
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to bootstrap think_db. Verify that the dedicated Think Render "
+                "credential can connect to the 'postgres' maintenance database and has "
+                "CREATEDB permission. ClassNet credentials must not be used here."
+            ) from exc
+        finally:
+            admin_engine.dispose()
+
     think_engine = create_engine(
         think_url,
         pool_pre_ping=True,
         pool_recycle=300,
+        pool_size=2,
+        max_overflow=0,
         connect_args={"connect_timeout": 10},
     )
-    Base.metadata.create_all(bind=think_engine)
-    logger.info("Think SQLAlchemy tables are ready in database %s", database_name)
+    try:
+        with think_engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        Base.metadata.create_all(bind=think_engine)
+    except Exception:
+        think_engine.dispose()
+        raise
+
+    logger.info(
+        "Think PostgreSQL ready: database='%s', tables=%s",
+        database_name,
+        ", ".join(sorted(Base.metadata.tables.keys())),
+    )
     return think_engine
 
 BASE_DIR = Path(__file__).resolve().parent
 
-app = FastAPI(title="Think — serveur de test", version="0.1-test")
+app = FastAPI(title="Think API", version="0.2-sandbox")
+
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+]
+_allow_credentials = "*" not in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
 )
 
 # ---------------------------------------------------------------------------
@@ -396,14 +522,18 @@ def seed() -> None:
 
 seed()
 
-# Engine kept alive for the lifetime of the FastAPI process.
-database_engine = None
-
-
 @app.on_event("startup")
 def startup_database():
     global database_engine
     database_engine = initialize_database()
+
+
+@app.on_event("shutdown")
+def shutdown_database():
+    global database_engine
+    if database_engine is not None:
+        database_engine.dispose()
+        database_engine = None
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +606,21 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "mode": "temporary-memory", "users": len(USERS), "message": "Think test server actif."}
+    if database_engine is None:
+        raise HTTPException(status_code=503, detail="Database not initialized.")
+    try:
+        with database_engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("Think database health check failed.")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+    return {
+        "ok": True,
+        "service": "think-api",
+        "environment": os.getenv("APP_ENV", "sandbox"),
+        "database": "connected",
+        "persistence": "schema-ready; legacy demo routes still use in-memory data",
+    }
 
 
 @app.post("/api/auth/login")
