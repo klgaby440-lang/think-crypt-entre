@@ -5514,23 +5514,28 @@ function initWalletInterface(){
     const agencies = transactionAgencies;
     const agencyGrid=(small=false)=>`<div class="wallet-agency-grid">${agencies.map(agency=>`<button class="wallet-agency" type="button" data-agency="${agency.name}" data-agency-slug="${agency.slug}"><img ${txLogo(agency)}><strong>${agency.name}</strong><small>${small ? agency.type : 'Choisir cette agence'}</small></button>`).join("")}</div>`;
     const walletCurrencies={CDF:{name:"Franc congolais",locale:"fr-CD"},USD:{name:"Dollar américain",locale:"en-US"},EUR:{name:"Euro",locale:"fr-FR"},GBP:{name:"Livre sterling",locale:"en-GB"},CNY:{name:"Yuan chinois",locale:"zh-CN"},INR:{name:"Roupie indienne",locale:"en-IN"},BRL:{name:"Real brésilien",locale:"pt-BR"},SAR:{name:"Riyal saoudien",locale:"ar-SA"},RUB:{name:"Rouble russe",locale:"ru-RU"},BDT:{name:"Taka bangladais",locale:"bn-BD"},IDR:{name:"Roupie indonésienne",locale:"id-ID"},TRY:{name:"Livre turque",locale:"tr-TR"}};
-    let walletCurrency=localStorage.getItem("think-wallet-currency")||"CDF";
-    let walletBaseUsd=THINK_LOCAL_BALANCE_USD;
-    let walletFxRates=null;
-    async function loadWalletFxRates(){try{const res=await fetch("https://open.er-api.com/v6/latest/USD",{cache:"no-store"});const data=await res.json();if(data&&data.result==="success"&&data.rates)walletFxRates=data.rates;}catch(e){console.warn("Taux FX portefeuille indisponibles",e);}}
-    function walletMoney(amountUsd){const code=walletCurrency;const rate=walletFxRates&&typeof walletFxRates[code]==="number"?walletFxRates[code]:1;const value=Number(amountUsd||0)*rate;const info=walletCurrencies[code]||walletCurrencies.CDF;return new Intl.NumberFormat(info.locale,{style:"currency",currency:code,maximumFractionDigits:2}).format(value);}
+    let walletCurrency=localStorage.getItem("think-wallet-currency")||window.THINK_SERVER_STATE?.me?.profile?.currency||"CDF";
+    function walletMoney(amount){
+      const info=walletCurrencies[walletCurrency]||walletCurrencies.CDF;
+      return new Intl.NumberFormat(info.locale,{style:"currency",currency:walletCurrency,maximumFractionDigits:2}).format(Number(amount)||0);
+    }
+    function currentWalletBalance(){
+      return Number(window.THINK_SERVER_STATE?.wallet?.balances?.[walletCurrency]??0);
+    }
     function updateWalletCurrencyUI(){
       const info=walletCurrencies[walletCurrency]||walletCurrencies.CDF;
-      const label=$("#walletCurrencyLabel"); if(label) label.textContent=`Solde personnel · ${walletCurrency} · ${info.name} · en attente de connexion officielle`;
-      const balance=$("#walletBalance"); if(balance) balance.textContent=walletMoney(walletBaseUsd);
-      const available=$("#walletBalanceAvailable"); if(available) available.textContent=walletMoney(walletBaseUsd);
+      const amount=currentWalletBalance();
+      const label=$("#walletCurrencyLabel"); if(label) label.textContent=`Solde Think · ${walletCurrency} · ${info.name} · Sandbox`;
+      const balance=$("#walletBalance"); if(balance) balance.textContent=walletMoney(amount);
+      const available=$("#walletBalanceAvailable"); if(available) available.textContent=walletMoney(amount);
       const curr=$("#walletBalanceCurrency"); if(curr) curr.textContent=walletCurrency;
       const income=$("#walletIncomeValue"); if(income) income.textContent=`+${walletMoney(0)}`;
       const expenses=$("#walletExpensesValue"); if(expenses) expenses.textContent=`−${walletMoney(0)}`;
       const incomeD=$("#walletIncomeDetail"); if(incomeD) incomeD.textContent=walletMoney(0);
       const expensesD=$("#walletExpensesDetail"); if(expensesD) expensesD.textContent=walletMoney(0);
+      const overview=$("#walletAvailableValue"); if(overview) overview.textContent=walletMoney(amount);
     }
-    loadWalletFxRates().then(updateWalletCurrencyUI);
+    updateWalletCurrencyUI();
     const render=(section)=>{
       const views={
         balance:["Solde","Gère ton argent personnel depuis un seul espace.",`<div class="wallet-option-grid">
