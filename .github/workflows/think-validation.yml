@@ -102,3 +102,96 @@ jobs:
           print("SQLAlchemy mappings OK.")
           print("Tables:", ", ".join(sorted(actual)))
           PY
+      - name: Smoke-test authenticated Sandbox API flows
+        run: |
+          python - <<'PY'
+          import os
+          from decimal import Decimal
+          from fastapi.testclient import TestClient
+          from sqlalchemy import create_engine
+          from sqlalchemy.orm import sessionmaker
+          from sqlalchemy.pool import StaticPool
+
+          os.environ["JWT_SECRET"] = "ci-test-secret-" + ("x" * 64)
+          os.environ["APP_ENV"] = "sandbox"
+
+          import main
+
+          engine = create_engine(
+              "sqlite://",
+              connect_args={"check_same_thread": False},
+              poolclass=StaticPool,
+          )
+          main.Base.metadata.create_all(bind=engine)
+          main.database_engine = engine
+          main.SessionLocal = sessionmaker(
+              bind=engine,
+              autoflush=False,
+              autocommit=False,
+              expire_on_commit=False,
+          )
+
+          client = TestClient(main.app)
+
+          created = client.post("/api/auth/register", json={
+              "full_name": "Sandbox Test",
+              "phone": "+243000000001",
+              "email": "sandbox-test@example.test",
+              "password": "SandboxPass123!",
+              "country": "RDC",
+              "currency": "CDF",
+          })
+          assert created.status_code == 200, created.text
+          token = created.json()["access_token"]
+          headers = {"Authorization": f"Bearer {token}"}
+
+          me = client.get("/api/me", headers=headers)
+          assert me.status_code == 200, me.text
+          assert me.json()["email"] == "sandbox-test@example.test"
+
+          credited = client.post("/api/wallet/sandbox-credit", headers=headers, json={
+              "amount": "12000.00",
+              "currency": "CDF",
+              "reason": "CI test only",
+          })
+          assert credited.status_code == 200, credited.text
+          assert credited.json()["no_real_money"] is True
+
+          transfer = client.post("/api/transfers", headers=headers, json={
+              "mode": "same",
+              "agency": "Orange Money",
+              "agency_slug": "orange",
+              "recipient": "+243000000002",
+              "beneficiary": "Test Recipient",
+              "amount": "1500.00",
+              "currency": "CDF",
+              "reason": "CI sandbox transfer",
+          })
+          assert transfer.status_code == 200, transfer.text
+          assert transfer.json()["transfer"]["status"] == "sandbox_pending"
+          assert transfer.json()["no_real_money_sent"] is True
+
+          withdrawal = client.post("/api/withdrawals", headers=headers, json={
+              "amount": "2000.00",
+              "currency": "CDF",
+              "operator": "orange",
+              "phone": "+243000000003",
+          })
+          assert withdrawal.status_code == 200, withdrawal.text
+          assert withdrawal.json()["withdrawal"]["status"] == "sandbox_pending"
+          assert withdrawal.json()["no_real_payout"] is True
+
+          wallet = client.get("/api/wallet", headers=headers)
+          assert wallet.status_code == 200, wallet.text
+          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("8500.0")
+          assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("3500.0")
+
+          transfers = client.get("/api/transfers", headers=headers)
+          withdrawals = client.get("/api/withdrawals", headers=headers)
+          assert transfers.status_code == 200 and len(transfers.json()["items"]) == 1
+          assert withdrawals.status_code == 200 and len(withdrawals.json()["items"]) == 1
+
+          print("Think Sandbox API smoke test OK: register, auth, credit, transfer, withdrawal.")
+          client.close()
+          engine.dispose()
+          PY
