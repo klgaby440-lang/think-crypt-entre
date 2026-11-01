@@ -56,6 +56,8 @@ logger = logging.getLogger("think.database")
 
 Base = declarative_base()
 database_engine = None
+SessionLocal = None
+PASSWORD_HASHER = PasswordHash.recommended()
 
 
 class ThinkUser(Base):
@@ -76,6 +78,27 @@ class ThinkUser(Base):
     transfers = relationship("Transfer", back_populates="user")
     subscriptions = relationship("Subscription", back_populates="user")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+    profile = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+
+
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), primary_key=True)
+    username = Column(String(40), nullable=True, unique=True, index=True)
+    first_name = Column(String(80), nullable=True)
+    last_name = Column(String(80), nullable=True)
+    birth_date = Column(String(10), nullable=True)
+    country = Column(String(80), nullable=False, default="RDC")
+    preferred_currency = Column(String(3), nullable=False, default="CDF")
+    address = Column(String(200), nullable=True)
+    city = Column(String(100), nullable=True)
+    postal_code = Column(String(24), nullable=True)
+    preferences = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser", back_populates="profile")
 
 
 class Wallet(Base):
