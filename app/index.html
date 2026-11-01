@@ -4099,9 +4099,28 @@ document.addEventListener("click", event => {
       const input=$("#subscriptionAmount"),box=$("#subscriptionAmountCheck"),validation=$("#subscriptionAmountValidation");
       if(!plan){showToast("Abonnement refusé : formule inconnue.");return;}
       if(!thinkValidateSubscriptionAmount(plan,input,box,validation)){showToast("Paiement refusé : montant invalide ou égal à 0 €.");return;}
-      /* Aucun droit Premium n'est créé côté navigateur. */
-      showToast(`Montant valide pour ${plan}. Confirmation officielle requise avant activation.`);
-      thinkAddNotification("Paiement en attente de vérification",`Demande ${plan} : confirmation officielle requise avant activation.`);
+      const method=submit.dataset.paySubmit||"mobile";
+      const agencySlug=document.querySelector("[data-mobile-agency].active")?.dataset.mobileAgency||null;
+      submit.disabled=true;
+      submit.textContent="Enregistrement…";
+      window.thinkApiRequest("/api/subscriptions/subscribe",{
+        method:"POST",
+        body:JSON.stringify({plan,amount:thinkNormalizeAmount(input?.value),method,agency_slug:agencySlug})
+      }).then(async result=>{
+        await window.thinkApiHydrate();
+        showToast(result.message||"Demande d’abonnement enregistrée en Sandbox.");
+        const details=document.querySelector(".subscription-payment");
+        if(details){
+          const note=document.createElement("div");
+          note.className="payment-process";
+          note.textContent="Demande enregistrée dans Think. Aucun paiement n'a été encaissé et l'abonnement reste en attente de confirmation.";
+          details.appendChild(note);
+        }
+      }).catch(error=>{
+        showToast(error.message||"Impossible d'enregistrer la demande d'abonnement.");
+        submit.disabled=false;
+        submit.textContent="Continuer vers le paiement";
+      });
     }
 });
 
