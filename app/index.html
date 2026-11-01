@@ -2247,17 +2247,19 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
 
   window.thinkApiHydrate = async function () {
     if (!window.thinkApiGetToken()) return null;
-    const [me, wallet, transfers, notifications, subscription] = await Promise.all([
+    const [me, wallet, transfers, withdrawals, notifications, subscription] = await Promise.all([
       window.thinkApiRequest("/api/me"),
       window.thinkApiRequest("/api/wallet"),
       window.thinkApiRequest("/api/transfers"),
+      window.thinkApiRequest("/api/withdrawals"),
       window.thinkApiRequest("/api/notifications"),
       window.thinkApiRequest("/api/subscriptions")
     ]);
-    const state = { me, wallet, transfers, notifications, subscription, loadedAt: Date.now() };
+    const state = { me, wallet, transfers, withdrawals, notifications, subscription, loadedAt: Date.now() };
     window.THINK_SERVER_STATE = state;
     try {
       localStorage.setItem("think-transfer-history", JSON.stringify(transfers.items || []));
+      localStorage.setItem("think-withdrawal-history", JSON.stringify(withdrawals.items || []));
       localStorage.setItem("think-notification-items", JSON.stringify(notifications.items || []));
       localStorage.setItem("think-subscription-server", JSON.stringify(subscription || {}));
       if (subscription && subscription.status === "active" && subscription.plan) {
@@ -5674,12 +5676,29 @@ function initWalletInterface(){
         const slug=b.dataset.agencySlug;
         const hint=$("#walletWithdrawHint");
         if(hint){
-          hint.innerHTML=`<strong>${name}</strong> sélectionné.<br><span style="color:var(--muted)">Entre maintenant le montant du retrait.</span><div class="wallet-form-row" style="margin-top:10px"><label class="wallet-form-field">Montant<input id="walletWithdrawAmount" type="number" min="0" step="0.01" placeholder="0,00"></label><label class="wallet-form-field">Devise<select id="walletWithdrawCurrency"><option>USD</option><option>EUR</option><option>CDF</option></select></label></div><div class="wallet-action-row" style="margin-top:10px"><button class="wallet-primary-btn" type="button" id="walletPrepareWithdraw">Continuer</button></div>`;
+          hint.innerHTML=`<strong>${name}</strong> sélectionné.<br><span style="color:var(--muted)">Demande de retrait Sandbox : renseigne le numéro destinataire et le montant. Aucun transfert réel ne sera envoyé.</span><div class="wallet-form-row" style="margin-top:10px"><label class="wallet-form-field">Numéro destinataire<input id="walletWithdrawPhone" type="tel" inputmode="tel" maxlength="40" placeholder="+243…"></label><label class="wallet-form-field">Montant<input id="walletWithdrawAmount" type="number" min="1" step="0.01" placeholder="0,00"></label><label class="wallet-form-field">Devise<select id="walletWithdrawCurrency"><option>USD</option><option>EUR</option><option>CDF</option></select></label></div><div class="wallet-action-row" style="margin-top:10px"><button class="wallet-primary-btn" type="button" id="walletPrepareWithdraw">Enregistrer la demande Sandbox</button></div><div id="walletWithdrawResult" class="wallet-flow-note" style="margin-top:10px" aria-live="polite"></div>`;
           const next=$("#walletPrepareWithdraw");
-          if(next) next.addEventListener('click',()=>{
+          if(next) next.addEventListener('click',async()=>{
             const amount=$("#walletWithdrawAmount")?.value;
-            if(!amount || Number(amount)<=0){ showToast("Entre un montant pour continuer."); return; }
-            showToast(`Retrait ${amount} ${$("#walletWithdrawCurrency")?.value || 'USD'} vers ${name} préparé. La connexion officielle de ${name} sera nécessaire pour confirmer.`);
+            const phone=$("#walletWithdrawPhone")?.value.trim();
+            const currency=$("#walletWithdrawCurrency")?.value||"CDF";
+            if(!amount || Number(amount)<1){ showToast("Le montant minimum est de 1 unité."); return; }
+            if(!phone || phone.length<6){ showToast("Entre un numéro destinataire valide."); return; }
+            next.disabled=true; next.textContent="Enregistrement…";
+            try{
+              const result=await window.thinkApiRequest("/api/withdrawals",{
+                method:"POST",
+                body:JSON.stringify({amount,currency,operator:slug,phone})
+              });
+              await window.thinkApiHydrate();
+              const target=$("#walletWithdrawResult");
+              if(target) target.innerHTML=`<strong>Demande enregistrée · ${result.withdrawal.public_id}</strong><span>Statut : en attente Sandbox. ${result.withdrawal.amount} ${currency} sont réservés. Aucun paiement Mobile Money réel n'a été envoyé.</span>`;
+              showToast("Demande de retrait enregistrée en Sandbox.");
+              updateWalletCurrencyUI();
+            }catch(error){
+              showToast(error.message||"Impossible d'enregistrer le retrait.");
+              next.disabled=false; next.textContent="Réessayer";
+            }
           });
         } else {
           showToast(`${name} sélectionné.`);
