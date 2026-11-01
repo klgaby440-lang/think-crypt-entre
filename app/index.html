@@ -2196,17 +2196,87 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
 .llink-notification-empty{margin-top:16px;padding:20px;border:1px dashed var(--line);border-radius:16px;color:var(--muted);text-align:center;background:color-mix(in srgb,var(--bg) 92%,var(--violet) 8%)}
 .llink-view-layer .llink-back-button{display:grid!important;place-items:center!important;visibility:visible!important;opacity:1!important}
 </style>
-<!-- Think API configuration (Render / Sandbox) -->
+<!-- Think API configuration and authenticated client (Render / Sandbox) -->
 <script>
   window.THINK_API_BASE_URL = "https://think-crypt-entreprise.onrender.com";
+  window.THINK_API_TOKEN_KEY = "think_access_token";
 
-  // Build absolute API URLs without hardcoding the host in every feature.
   window.thinkApiUrl = function (path) {
     let normalizedPath = String(path || "");
-    while (normalizedPath.startsWith("/")) {
-      normalizedPath = normalizedPath.slice(1);
-    }
+    while (normalizedPath.startsWith("/")) normalizedPath = normalizedPath.slice(1);
     return new URL(normalizedPath, window.THINK_API_BASE_URL + "/").toString();
+  };
+
+  window.thinkApiGetToken = function () {
+    try { return sessionStorage.getItem(window.THINK_API_TOKEN_KEY) || ""; }
+    catch (_) { return ""; }
+  };
+  window.thinkApiSetToken = function (token) {
+    try { sessionStorage.setItem(window.THINK_API_TOKEN_KEY, String(token || "")); return true; }
+    catch (_) { return false; }
+  };
+  window.thinkApiClearToken = function () {
+    try { sessionStorage.removeItem(window.THINK_API_TOKEN_KEY); } catch (_) {}
+    window.THINK_SERVER_STATE = null;
+  };
+
+  window.thinkApiRequest = async function (path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set("Accept", "application/json");
+    if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const token = window.thinkApiGetToken();
+    if (token && options.auth !== false) headers.set("Authorization", "Bearer " + token);
+    const requestOptions = { ...options, headers, cache: "no-store" };
+    delete requestOptions.auth;
+    const response = await fetch(window.thinkApiUrl(path), requestOptions);
+    const contentType = response.headers.get("content-type") || "";
+    let payload = null;
+    if (contentType.includes("application/json")) {
+      payload = await response.json();
+    } else {
+      const raw = await response.text();
+      payload = raw ? { detail: raw.slice(0, 300) } : {};
+    }
+    if (!response.ok) {
+      if (response.status === 401 && token) window.thinkApiClearToken();
+      const message = payload && (payload.detail || payload.message);
+      throw new Error(message || ("Erreur API HTTP " + response.status));
+    }
+    return payload;
+  };
+
+  window.thinkApiHydrate = async function () {
+    if (!window.thinkApiGetToken()) return null;
+    const [me, wallet, transfers, notifications, subscription] = await Promise.all([
+      window.thinkApiRequest("/api/me"),
+      window.thinkApiRequest("/api/wallet"),
+      window.thinkApiRequest("/api/transfers"),
+      window.thinkApiRequest("/api/notifications"),
+      window.thinkApiRequest("/api/subscriptions")
+    ]);
+    const state = { me, wallet, transfers, notifications, subscription, loadedAt: Date.now() };
+    window.THINK_SERVER_STATE = state;
+    try {
+      localStorage.setItem("think-transfer-history", JSON.stringify(transfers.items || []));
+      localStorage.setItem("think-notification-items", JSON.stringify(notifications.items || []));
+      localStorage.setItem("think-subscription-server", JSON.stringify(subscription || {}));
+      const profile = me.profile || {};
+      localStorage.setItem("think-profile", JSON.stringify({
+        firstName: profile.first_name || (me.full_name || "").split(" ")[0] || "",
+        lastName: profile.last_name || (me.full_name || "").split(" ").slice(1).join(" "),
+        username: profile.username || "",
+        birthDate: profile.birth_date || "",
+        country: profile.country || "RDC",
+        currency: profile.currency || "CDF",
+        phone: me.phone || "",
+        email: me.email || "",
+        address: profile.address || "",
+        city: profile.city || "",
+        postalCode: profile.postal_code || "",
+        accountCreated: true
+      }));
+    } catch (_) {}
+    return state;
   };
 </script>
 
