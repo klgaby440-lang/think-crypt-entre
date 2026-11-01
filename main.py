@@ -549,12 +549,18 @@ def seed() -> None:
     add_notification(demo, "Abonnement actif", "La formule Standard est active dans le serveur de test.", "subscription")
 
 
-seed()
+# No demo user or demo balance is seeded; accounts are created through the API.
 
 @app.on_event("startup")
 def startup_database():
-    global database_engine
+    global database_engine, SessionLocal
     database_engine = initialize_database()
+    SessionLocal = sessionmaker(
+        bind=database_engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
 
 
 @app.on_event("shutdown")
