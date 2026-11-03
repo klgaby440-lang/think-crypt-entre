@@ -80,7 +80,8 @@ jobs:
           python - <<'PY'
           import cinetpay
           from cinetpay import CinetPayClient, ClientConfig, CountryCredentials
-          from cinetpay import COUNTRY_CODES, PAYMENT_METHODS_BY_COUNTRY
+          from cinetpay import COUNTRY_CODES, PAYMENT_METHODS_BY_COUNTRY, PaymentRequest
+          from cinetpay.validation import validate_payment_request
 
           assert cinetpay.__version__ == "0.1.0"
           assert "CD" in COUNTRY_CODES
@@ -92,7 +93,25 @@ jobs:
           }))
           assert client.countries() == ["CD"]
           client.close()
-          print("Official CinetPay v1 SDK loaded; DRC (CD) and all four payment methods are available.")
+
+          # Validate the exact RDC/CDF PayIn request shape before any network call.
+          request = PaymentRequest(
+              currency="CDF",
+              merchant_transaction_id="THK0123456789ABCDEF012345",
+              amount=1000,
+              lang="fr",
+              designation="Depot portefeuille Think",
+              client_email="alice@example.test",
+              client_first_name="Alice",
+              client_last_name="Sandbox",
+              success_url="https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/return?payment=PAY-0123456789ABCDEF&result=success",
+              failed_url="https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/return?payment=PAY-0123456789ABCDEF&result=failed",
+              notify_url="https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/notify",
+              channel="PUSH",
+              payment_method="OM_CD",
+          )
+          validate_payment_request(request)
+          print("Official CinetPay v1 SDK loaded; DRC methods and CDF PayIn request validation OK.")
           PY
 
       - name: Validate SQLAlchemy model mappings
