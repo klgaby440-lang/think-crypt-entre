@@ -1022,7 +1022,7 @@ def internal_transfers(
     user: ThinkUser = Depends(get_current_user),
 ):
     if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
-        raise HTTPException(status_code=404, detail="Les transferts internes Sandbox sont désactivés.")
+        return {"items": [], "test_mode": False}
     rows = (
         db.query(InternalTransfer)
         .filter(or_(
