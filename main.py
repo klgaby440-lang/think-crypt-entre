@@ -1711,12 +1711,12 @@ def create_payment(
         "CINETPAY_NOTIFY_URL",
         "https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/notify",
     ).strip()
-    success_url = _payment_return_url(public_id, "success")
-    failed_url = _payment_return_url(public_id, "failed")
 
     try:
         from cinetpay import PaymentRequest
 
+        success_url = _payment_return_url(public_id, "success")
+        failed_url = _payment_return_url(public_id, "failed")
         request_data = PaymentRequest(
             currency=currency,
             merchant_transaction_id=merchant_transaction_id,
@@ -1733,10 +1733,28 @@ def create_payment(
             payment_method=payment_method,
         )
         provider_response = client.payment.initialize(request_data, "CD")
-        _validate_cinetpay_payment_url(provider_response.payment_url, provider_config["mode"])
+        try:
+            _validate_cinetpay_payment_url(provider_response.payment_url, provider_config["mode"])
+        except HTTPException:
+            # The provider may already have created this payment. Do not allow a blind retry.
+            row.status = "initialization_unknown"
+            row.provider_response = {
+                "environment": provider_config["mode"],
+                "error_type": "unexpected_checkout_url",
+            }
+            db.commit()
+            raise
         if not provider_response.notify_token or not provider_response.transaction_id:
             raise RuntimeError("CinetPay response is missing notification or transaction references.")
-    except HTTPException:
+    except HTTPException as exc:
+        if row.status == "initializing":
+            row.status = "initialization_failed"
+            row.provider_response = {
+                "environment": provider_config["mode"],
+                "error_type": "local_configuration",
+                "error_status": exc.status_code,
+            }
+            db.commit()
         raise
     except Exception as exc:
         row.status = "initialization_unknown"
