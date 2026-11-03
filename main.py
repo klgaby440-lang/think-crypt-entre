@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from urllib.parse import urlparse
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     JSON,
@@ -476,7 +478,8 @@ class PaymentData(BaseModel):
     purpose: str = Field(default="wallet_deposit", max_length=40)
     amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(default="CDF", min_length=3, max_length=3)
-    description: str = Field(default="Paiement Think", max_length=200)
+    description: str = Field(default="Dépôt Think", max_length=200)
+    payment_method: str | None = Field(default=None, max_length=24)
 
 
 class SandboxCreditData(BaseModel):
@@ -619,6 +622,36 @@ def serialize_internal_transfer(item: InternalTransfer, current_user_id: int) ->
         "reason": item.reason or "",
         "created_at": created,
         "no_real_money_moved": True,
+    }
+
+
+
+def serialize_payment(item: PaymentTransaction) -> dict[str, Any]:
+    """Serialize a payment without exposing CinetPay API or notification tokens."""
+    created = item.created_at.isoformat() if item.created_at else None
+    labels = {
+        "accepted": "Paiement confirmé",
+        "pending": "Paiement en attente",
+        "initializing": "Initialisation du paiement",
+        "initialization_unknown": "Confirmation d'initialisation à vérifier",
+        "initialization_failed": "Initialisation échouée",
+        "failed": "Paiement refusé",
+    }
+    return {
+        "id": item.id,
+        "public_id": item.public_id,
+        "merchant_transaction_id": item.merchant_transaction_id,
+        "provider_transaction_id": item.provider_transaction_id,
+        "provider": item.provider,
+        "purpose": item.purpose,
+        "amount": float(item.amount),
+        "currency": item.currency,
+        "status": item.status,
+        "status_label": labels.get(item.status, item.status),
+        "created_at": created,
+        "payment_url_available": bool(item.payment_url and item.status in {"pending", "initializing"}),
+        "notificationText": f"{labels.get(item.status, item.status)} · {item.amount} {item.currency}",
+        "no_real_money": bool((item.provider_response or {}).get("environment") == "sandbox"),
     }
 
 
@@ -1356,38 +1389,480 @@ def subscribe(
     }
 
 
-@app.post("/api/payments/create")
-def create_payment(
-    data: PaymentData,
+def _truthy_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cinetpay_environment_status() -> dict[str, Any]:
+    mode = os.getenv("CINETPAY_MODE", "sandbox").strip().lower()
+    api_key = os.getenv("CINETPAY_API_KEY_CD", "").strip()
+    api_password = os.getenv("CINETPAY_API_PASSWORD_CD", "").strip()
+    app_env = os.getenv("APP_ENV", "sandbox").strip().lower()
+    enabled = _truthy_env("CINETPAY_ENABLED")
+    merchant_verified = _truthy_env("CINETPAY_MERCHANT_VERIFIED")
+    payout_enabled = _truthy_env("CINETPAY_PAYOUT_ENABLED")
+
+    ready = enabled and bool(api_key and api_password)
+    message = "CinetPay n'est pas encore configuré."
+    if not enabled:
+        message = "PayIn CinetPay est désactivé. Active CINETPAY_ENABLED après avoir configuré les clés Sandbox."
+    elif not api_key or not api_password:
+        ready = False
+        message = "Les clés API Sandbox du pays CD sont manquantes."
+    elif mode == "sandbox":
+        if not api_key.startswith("sk_test_"):
+            ready = False
+            message = "Le mode Sandbox exige une clé CinetPay commençant par sk_test_."
+        elif app_env != "sandbox":
+            ready = False
+            message = "Le Sandbox CinetPay ne peut fonctionner que lorsque APP_ENV=sandbox."
+        else:
+            message = "PayIn CinetPay Sandbox est prêt."
+    elif mode == "production":
+        if not merchant_verified:
+            ready = False
+            message = "La production est bloquée : le compte marchand CRYPT n'est pas encore vérifié."
+        elif not _truthy_env("CINETPAY_PRODUCTION_ENABLED"):
+            ready = False
+            message = "La production est verrouillée. CINETPAY_PRODUCTION_ENABLED doit être activé après validation."
+        elif not api_key.startswith("sk_live_"):
+            ready = False
+            message = "Le mode production exige une clé CinetPay commençant par sk_live_."
+        elif app_env != "production":
+            ready = False
+            message = "La production exige APP_ENV=production."
+        else:
+            message = "PayIn CinetPay Production est configuré."
+    else:
+        ready = False
+        message = "CINETPAY_MODE doit être sandbox ou production."
+
+    return {
+        "enabled": ready,
+        "payin_enabled": ready,
+        "payout_enabled": False,  # PayOut stays blocked until CinetPay confirms activation.
+        "mode": mode if mode in {"sandbox", "production"} else "unknown",
+        "country": "CD",
+        "currency": os.getenv("CINETPAY_CURRENCY", "CDF").strip().upper(),
+        "merchant_verified": merchant_verified,
+        "payout_authorized": payout_enabled,
+        "message": message,
+    }
+
+
+def _require_cinetpay():
+    status = _cinetpay_environment_status()
+    if not status["payin_enabled"]:
+        raise HTTPException(status_code=503, detail=status["message"])
+    api_key = os.getenv("CINETPAY_API_KEY_CD", "").strip()
+    api_password = os.getenv("CINETPAY_API_PASSWORD_CD", "").strip()
+    try:
+        from cinetpay import CinetPayClient, ClientConfig, CountryCredentials
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Le SDK officiel cinetpay-python n'est pas installé.") from None
+    return _cached_cinetpay_client(api_key, api_password), status
+
+
+@lru_cache(maxsize=2)
+def _cached_cinetpay_client(api_key: str, api_password: str):
+    """Keep one SDK client/token cache per credential set for this process."""
+    from cinetpay import CinetPayClient, ClientConfig, CountryCredentials
+
+    return CinetPayClient(ClientConfig(
+        credentials={"CD": CountryCredentials(api_key=api_key, api_password=api_password)},
+        timeout=25.0,
+        debug=False,
+    ))
+
+
+def _payment_return_url(public_id: str, result: str) -> str:
+    base = os.getenv("THINK_PUBLIC_BASE_URL", "https://think-crypt-entreprise.onrender.com").strip().rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise HTTPException(status_code=503, detail="THINK_PUBLIC_BASE_URL doit être une URL HTTPS publique.")
+    return f"{base}/api/cinetpay/payin/return?payment={public_id}&result={result}"
+
+
+def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
+    parsed = urlparse(payment_url or "")
+    expected_host = "secure.cinetpay.net" if mode == "sandbox" else "secure.cinetpay.co"
+    if parsed.scheme != "https" or not parsed.hostname or not (
+        parsed.hostname == expected_host or parsed.hostname.endswith("." + expected_host)
+    ):
+        raise HTTPException(status_code=502, detail="CinetPay a retourné une URL de paiement inattendue.")
+
+
+@app.get("/api/cinetpay/status")
+def cinetpay_status(user: ThinkUser = Depends(get_current_user)):
+    return _cinetpay_environment_status()
+
+
+@app.get("/api/payments")
+def list_payments(
     db: Session = Depends(get_db),
     user: ThinkUser = Depends(get_current_user),
 ):
-    currency = data.currency.upper()
-    if currency not in ALLOWED_CURRENCIES:
-        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+    rows = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.user_id == user.id)
+        .order_by(PaymentTransaction.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return {"items": [serialize_payment(row) for row in rows]}
+
+
+def _sync_cinetpay_payment_status(
+    db: Session,
+    payment: PaymentTransaction,
+    provider_status: Any,
+) -> PaymentTransaction:
+    """Apply only a status fetched directly from CinetPay; never trust webhook status fields."""
+    merchant_id = str(getattr(provider_status, "merchant_transaction_id", "") or "")
+    provider_id = str(getattr(provider_status, "transaction_id", "") or "")
+    status = str(getattr(provider_status, "status", "") or "").upper()
+
+    if merchant_id != payment.merchant_transaction_id:
+        raise HTTPException(status_code=409, detail="La référence marchand retournée par CinetPay ne correspond pas.")
+    if not provider_id or (
+        payment.provider_transaction_id and provider_id != payment.provider_transaction_id
+    ):
+        raise HTTPException(status_code=409, detail="La référence CinetPay ne correspond pas à cette demande.")
+
+    # Lock and refresh the row: concurrent/repeated webhooks must never credit twice.
+    locked = (
+        db.query(PaymentTransaction)
+        .filter(PaymentTransaction.id == payment.id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Transaction Think introuvable.")
+
+    response_data = dict(locked.provider_response or {})
+    response_data["last_provider_status"] = status
+    response_data["last_provider_check_at"] = datetime.now(timezone.utc).isoformat()
+    locked.provider_response = response_data
+    locked.provider_transaction_id = provider_id
+
+    if locked.status == "accepted":
+        return locked
+
+    if status == "SUCCESS":
+        wallet_row = (
+            db.query(Wallet)
+            .filter(Wallet.user_id == locked.user_id, Wallet.currency == locked.currency)
+            .with_for_update()
+            .first()
+        )
+        if wallet_row is None:
+            raise HTTPException(status_code=404, detail="Portefeuille du bénéficiaire introuvable.")
+        wallet_row.available_balance = Decimal(wallet_row.available_balance) + Decimal(locked.amount)
+        locked.status = "accepted"
+        ledger_reference = "CNPIN-" + locked.public_id
+        ledger_exists = db.query(LedgerEntry).filter(LedgerEntry.reference == ledger_reference).first()
+        if ledger_exists is None:
+            db.add(LedgerEntry(
+                wallet_id=wallet_row.id,
+                entry_type="DEPOSIT",
+                amount=Decimal(locked.amount),
+                currency=locked.currency,
+                status="confirmed",
+                reference=ledger_reference,
+                related_type="payment",
+                related_id=str(locked.id),
+                description=f"Dépôt CinetPay confirmé ({locked.merchant_transaction_id}).",
+                extra_data={"provider": "cinetpay_v1", "no_real_money": locked.provider_response.get("environment") == "sandbox"},
+            ))
+            notify_user(
+                db, locked.user_id, "Dépôt CinetPay confirmé",
+                f"{locked.amount} {locked.currency} ont été ajoutés à ton portefeuille Think.",
+                "finance",
+            )
+        else:
+            # A ledger row already exists: repair the payment status without crediting again.
+            locked.status = "accepted"
+    elif status in {"FAILED", "TRANSACTION_EXIST", "INSUFFICIENT_BALANCE"}:
+        locked.status = "failed"
+    else:
+        # INITIATED/PENDING and unknown transitional statuses remain pending.
+        if locked.status not in {"initialization_failed", "failed"}:
+            locked.status = "pending"
+
+    db.commit()
+    db.refresh(locked)
+    return locked
+
+
+def _fetch_and_sync_cinetpay_payment(db: Session, payment: PaymentTransaction) -> PaymentTransaction:
+    client, _ = _require_cinetpay()
+    identifier = payment.provider_transaction_id or payment.merchant_transaction_id
+    try:
+        provider_status = client.payment.get_status(identifier, "CD")
+    except Exception as exc:
+        logger.warning(
+            "CinetPay status check failed for %s (%s).",
+            payment.public_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=502, detail="Impossible de vérifier le statut CinetPay pour le moment.") from None
+    return _sync_cinetpay_payment_status(db, payment, provider_status)
+
+
+@app.post("/api/payments/create")
+def create_payment(
+    data: PaymentData,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    client, provider_config = _require_cinetpay()
+    currency = data.currency.strip().upper()
+    expected_currency = provider_config["currency"]
+    if currency != expected_currency or currency != "CDF":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Les dépôts CinetPay pour le compte RDC sont configurés en {expected_currency}.",
+        )
+
+    amount_decimal = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount_decimal != data.amount or amount_decimal != amount_decimal.to_integral_value():
+        raise HTTPException(status_code=422, detail="Le montant CDF doit être un nombre entier.")
+    amount = int(amount_decimal)
+    if amount < 100 or amount > 2_500_000:
+        raise HTTPException(status_code=422, detail="Le montant CinetPay doit être compris entre 100 et 2 500 000 CDF.")
+    if amount % 5 != 0:
+        raise HTTPException(status_code=422, detail="Le montant CinetPay doit être un multiple de 5.")
+
+    allowed_methods = {"OM_CD", "AIRTEL_CD", "MPESA_CD", "AFRICELL_CD"}
+    payment_method = data.payment_method.strip().upper() if data.payment_method else None
+    if payment_method and payment_method not in allowed_methods:
+        raise HTTPException(status_code=422, detail="Moyen de paiement CinetPay non reconnu pour la RDC.")
+
+    if idempotency_key is not None:
+        idempotency_key = idempotency_key.strip()
+        if not idempotency_key or len(idempotency_key) > 128:
+            raise HTTPException(status_code=422, detail="Clé d'idempotence invalide.")
+    else:
+        idempotency_key = "payin-" + uuid4().hex
+
+    existing = db.query(PaymentTransaction).filter(
+        PaymentTransaction.idempotency_key == idempotency_key
+    ).first()
+    if existing:
+        if existing.user_id != user.id:
+            raise HTTPException(status_code=409, detail="Cette clé d'idempotence appartient à une autre session.")
+        if (
+            Decimal(existing.amount) != amount_decimal
+            or existing.currency != currency
+            or existing.purpose != data.purpose
+        ):
+            raise HTTPException(status_code=409, detail="Cette clé d'idempotence a déjà été utilisée pour une autre demande.")
+        if existing.payment_url:
+            return {
+                **serialize_payment(existing),
+                "payment_url": existing.payment_url,
+                "test_mode": (existing.provider_response or {}).get("environment") == "sandbox",
+                "idempotent_replay": True,
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="La première initialisation doit être vérifiée avant de créer une nouvelle demande. Utilise une nouvelle clé uniquement après rapprochement.",
+        )
+
+    public_id = "PAY-" + uuid4().hex[:16].upper()
+    merchant_transaction_id = "THK" + uuid4().hex[:24].upper()
     row = PaymentTransaction(
-        public_id="PAY-" + uuid4().hex[:16].upper(),
+        public_id=public_id,
         user_id=user.id,
         purpose=data.purpose,
-        amount=data.amount.quantize(CENT, rounding=ROUND_HALF_UP),
+        amount=amount_decimal,
         currency=currency,
-        provider="sandbox",
-        merchant_transaction_id="THINK-" + uuid4().hex[:20].upper(),
-        status="pending_sandbox",
-        provider_response={"test_mode": True, "no_real_payment": True},
+        provider="cinetpay_v1",
+        merchant_transaction_id=merchant_transaction_id,
+        status="initializing",
+        idempotency_key=idempotency_key,
+        provider_response={"environment": provider_config["mode"]},
     )
     db.add(row)
     db.commit()
     db.refresh(row)
-    return {
-        "public_id": row.public_id,
-        "status": row.status,
-        "amount": float(row.amount),
-        "currency": row.currency,
-        "purpose": row.purpose,
-        "description": data.description,
-        "payment_url": None,
-        "test_mode": True,
-        "no_real_payment": True,
-        "message": "Demande enregistrée. L'intégration CinetPay PAYIN sera ajoutée dans la phase suivante.",
+
+    profile = user.profile
+    first_name = (profile.first_name if profile else "") or ""
+    last_name = (profile.last_name if profile else "") or ""
+    if not first_name.strip() or not last_name.strip():
+        parts = user.full_name.strip().split()
+        if len(parts) < 2:
+            row.status = "initialization_failed"
+            row.provider_response = {"environment": provider_config["mode"], "error": "profile_name_incomplete"}
+            db.commit()
+            raise HTTPException(
+                status_code=422,
+                detail="Complète ton prénom et ton nom dans ton profil avant de déposer de l'argent avec CinetPay.",
+            )
+        first_name = first_name.strip() or parts[0]
+        last_name = last_name.strip() or " ".join(parts[1:])
+
+    description = re.sub(r"[^A-Za-z0-9À-ÿ .'-]", " ", data.description).strip() or "Depot Think"
+    notify_url = os.getenv(
+        "CINETPAY_NOTIFY_URL",
+        "https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/notify",
+    ).strip()
+    success_url = _payment_return_url(public_id, "success")
+    failed_url = _payment_return_url(public_id, "failed")
+
+    try:
+        from cinetpay import PaymentRequest
+
+        request_data = PaymentRequest(
+            currency=currency,
+            merchant_transaction_id=merchant_transaction_id,
+            amount=amount,
+            lang="fr",
+            designation=description,
+            client_email=user.email,
+            client_first_name=first_name.strip(),
+            client_last_name=last_name.strip(),
+            success_url=success_url,
+            failed_url=failed_url,
+            notify_url=notify_url,
+            channel="PUSH",
+            payment_method=payment_method,
+        )
+        provider_response = client.payment.initialize(request_data, "CD")
+        _validate_cinetpay_payment_url(provider_response.payment_url, provider_config["mode"])
+        if not provider_response.notify_token or not provider_response.transaction_id:
+            raise RuntimeError("CinetPay response is missing notification or transaction references.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        row.status = "initialization_unknown"
+        row.provider_response = {
+            "environment": provider_config["mode"],
+            "error_type": type(exc).__name__,
+        }
+        db.commit()
+        logger.warning(
+            "CinetPay payment initialization unresolved for %s (%s).",
+            public_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"CinetPay n'a pas confirmé l'initialisation. Référence Think : {public_id}. Vérifie cette demande avant de réessayer.",
+        ) from None
+
+    row.provider_transaction_id = provider_response.transaction_id
+    row.payment_url = provider_response.payment_url
+    row.status = "pending"
+    row.provider_response = {
+        "environment": provider_config["mode"],
+        "notify_token": provider_response.notify_token,
+        "payment_token": provider_response.payment_token,
+        "provider_status": provider_response.status,
     }
+    db.commit()
+    db.refresh(row)
+    return {
+        **serialize_payment(row),
+        "payment_url": row.payment_url,
+        "test_mode": provider_config["mode"] == "sandbox",
+        "idempotent_replay": False,
+    }
+
+
+@app.get("/api/payments/{public_id}")
+def get_payment(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    row = db.query(PaymentTransaction).filter(
+        PaymentTransaction.public_id == public_id,
+        PaymentTransaction.user_id == user.id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Paiement Think introuvable.")
+    return serialize_payment(row)
+
+
+@app.post("/api/payments/{public_id}/refresh")
+def refresh_payment(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    row = db.query(PaymentTransaction).filter(
+        PaymentTransaction.public_id == public_id,
+        PaymentTransaction.user_id == user.id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Paiement Think introuvable.")
+    if row.provider != "cinetpay_v1":
+        return serialize_payment(row)
+    if row.status not in {"accepted", "failed"}:
+        row = _fetch_and_sync_cinetpay_payment(db, row)
+    return serialize_payment(row)
+
+
+@app.api_route("/api/cinetpay/payin/notify", methods=["GET", "POST"])
+def cinetpay_payin_notify(request: Request, db: Session = Depends(get_db)):
+    # CinetPay also performs a GET availability ping to the notify URL.
+    if request.method == "GET":
+        return {"ok": True, "service": "cinetpay-payin-notify"}
+    try:
+        from cinetpay import parse_notification, verify_notification
+
+        body = request.json() if False else None
+    except Exception:
+        raise HTTPException(status_code=503, detail="Le SDK CinetPay est indisponible.") from None
+    try:
+        # Request.json() is async; FastAPI sync routes receive the raw body below.
+        raw_body = request.scope.get("state", {}).get("cinetpay_body")
+    except Exception:
+        raw_body = None
+    if raw_body is None:
+        raise HTTPException(status_code=400, detail="Notification CinetPay invalide.")
+    try:
+        notification = parse_notification(raw_body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Notification CinetPay incomplète.") from None
+
+    row = db.query(PaymentTransaction).filter(
+        PaymentTransaction.merchant_transaction_id == notification.merchant_transaction_id,
+        PaymentTransaction.provider == "cinetpay_v1",
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Référence de paiement Think inconnue.")
+    expected_token = str((row.provider_response or {}).get("notify_token") or "")
+    if not expected_token or not verify_notification(expected_token, notification.notify_token):
+        raise HTTPException(status_code=401, detail="Jeton de notification CinetPay invalide.")
+    if row.provider_transaction_id and row.provider_transaction_id != notification.transaction_id:
+        raise HTTPException(status_code=409, detail="Référence prestataire incohérente.")
+
+    client, _ = _require_cinetpay()
+    try:
+        provider_status = client.payment.get_status(notification.transaction_id, "CD")
+    except Exception as exc:
+        logger.warning(
+            "CinetPay webhook verification failed for %s (%s).",
+            row.public_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=502, detail="La vérification CinetPay a échoué. La notification pourra être renvoyée.") from None
+    synced = _sync_cinetpay_payment_status(db, row, provider_status)
+    return {"ok": True, "public_id": synced.public_id, "status": synced.status}
+
+
+@app.get("/api/cinetpay/payin/return")
+def cinetpay_payin_return(payment: str, result: str = "returned"):
+    # The redirect is informational only; the webhook/provider status check is authoritative.
+    safe_result = result if result in {"success", "failed"} else "returned"
+    return RedirectResponse(
+        url=f"/?cinetpay_payment={payment}&cinetpay_result={safe_result}",
+        status_code=303,
+    )
+
+
