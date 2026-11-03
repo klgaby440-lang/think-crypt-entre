@@ -4593,6 +4593,7 @@ function renderInternalTransferForm(){
             <button class="tx-primary" type="button" id="txInternalConfirm">Confirmer le transfert</button>
             <div class="tx-info">Ce transfert déplace uniquement des crédits fictifs Sandbox entre deux portefeuilles Think. Aucun argent réel n'est envoyé.</div></div>`;
         $("#txInternalEdit")?.addEventListener("click",renderInternalTransferForm);
+        const internalIdempotencyKey="thi-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
         $("#txInternalConfirm")?.addEventListener("click",async event=>{
             const button=event.currentTarget;
             if(button.disabled) return;
@@ -4600,7 +4601,7 @@ function renderInternalTransferForm(){
             try{
                 const result=await window.thinkApiRequest("/api/internal-transfers",{
                     method:"POST",
-                    headers:{"Idempotency-Key":"thi-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2))},
+                    headers:{"Idempotency-Key":internalIdempotencyKey},
                     body:JSON.stringify({recipient_think_id:target.think_id,amount:String(amount),currency:code,reason})
                 });
                 await window.thinkApiHydrate();
