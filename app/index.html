@@ -2247,20 +2247,35 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
 
   window.thinkApiHydrate = async function () {
     if (!window.thinkApiGetToken()) return null;
-    const [me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription] = await Promise.all([
+    const returnedPayment = new URLSearchParams(window.location.search).get("cinetpay_payment");
+    if (returnedPayment) {
+      try {
+        await window.thinkApiRequest("/api/payments/" + encodeURIComponent(returnedPayment) + "/refresh", { method: "POST" });
+      } catch (_) {}
+      try {
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete("cinetpay_payment");
+        cleanUrl.searchParams.delete("cinetpay_result");
+        window.history.replaceState(null, "", cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+      } catch (_) {}
+    }
+    const [me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription, payments, cinetpay] = await Promise.all([
       window.thinkApiRequest("/api/me"),
       window.thinkApiRequest("/api/wallet"),
       window.thinkApiRequest("/api/transfers"),
       window.thinkApiRequest("/api/internal-transfers"),
       window.thinkApiRequest("/api/withdrawals"),
       window.thinkApiRequest("/api/notifications"),
-      window.thinkApiRequest("/api/subscriptions")
+      window.thinkApiRequest("/api/subscriptions"),
+      window.thinkApiRequest("/api/payments"),
+      window.thinkApiRequest("/api/cinetpay/status")
     ]);
-    const state = { me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription, loadedAt: Date.now() };
+    const state = { me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription, payments, cinetpay, loadedAt: Date.now() };
     window.THINK_SERVER_STATE = state;
     try {
       localStorage.setItem("think-transfer-history", JSON.stringify(transfers.items || []));
       localStorage.setItem("think-internal-transfer-history", JSON.stringify(internalTransfers.items || []));
+      localStorage.setItem("think-payment-history", JSON.stringify(payments.items || []));
       localStorage.setItem("think-withdrawal-history", JSON.stringify(withdrawals.items || []));
       localStorage.setItem("think-notification-items", JSON.stringify(notifications.items || []));
       localStorage.setItem("think-subscription-server", JSON.stringify(subscription || {}));
@@ -3475,7 +3490,14 @@ function thinkGetMovementRecords(){
       notificationText:`${item.amount} ${item.currency} · ${item.status} · Sandbox`,
       movementDate:item.created_at||""
     }));
-    return [...transfers,...withdrawals,...internal].sort((a,b)=>Date.parse(b.movementDate||0)-Date.parse(a.movementDate||0));
+    const payments=(server.payments?.items||[]).map(item=>({
+      ...item,
+      movementType:"Dépôt",
+      movementLabel:`Dépôt CinetPay · ${item.status_label||item.status}`,
+      notificationText:`${item.public_id} · ${item.amount} ${item.currency}`,
+      movementDate:item.created_at||""
+    }));
+    return [...transfers,...withdrawals,...internal,...payments].sort((a,b)=>Date.parse(b.movementDate||0)-Date.parse(a.movementDate||0));
 }
 function thinkSaveTransfers(items){ localStorage.setItem(THINK_TRANSFER_KEY, JSON.stringify(items.slice(-100))); }
 function thinkGetNotifications(){
@@ -5811,7 +5833,7 @@ function initWalletInterface(){
     function walletDetailAction(action){
       if(action==="transfer"){showContent("Transactions","Transferts et services financiers",getPageContent("Transactions"));return;}
       const panels={
-        add:["Ajouter de l’argent","Créditer un portefeuille de test sans mouvement d’argent réel.",`<div class="wallet-flow-note"><strong>Mode Sandbox uniquement</strong><span>Ce formulaire ajoute un solde fictif pour tester l’interface et les écritures comptables. Il ne lance aucun paiement CinetPay et ne reçoit aucun argent réel.</span></div><form id="walletSandboxCreditForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant de test<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0,00"></label><label class="wallet-form-field">Devise<select name="currency">${Object.keys(walletCurrencies).map(code=>`<option value="${code}" ${code===walletCurrency?"selected":""}>${code}</option>`).join("")}</select></label></div><label class="wallet-form-field">Motif<input name="reason" maxlength="200" placeholder="Test de portefeuille"></label><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Ajouter un solde fictif</button></div></form>`],
+        add:["Ajouter de l’argent","Dépôt CinetPay Sandbox et crédits fictifs locaux pour les essais.",`<div class="wallet-flow-note"><strong>CinetPay PayIn · ${window.THINK_SERVER_STATE?.cinetpay?.mode==="sandbox"?"Sandbox":"Configuration"}</strong><span>${txEscapeHtml(window.THINK_SERVER_STATE?.cinetpay?.message||"Vérification de la configuration CinetPay…")} Aucun retrait PayOut réel n'est activé.</span></div><form id="walletCinetPayForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant à déposer (CDF)<input name="amount" type="number" min="100" max="2500000" step="5" required placeholder="1000"></label><label class="wallet-form-field">Réseau<select name="payment_method"><option value="">Choix sur le guichet CinetPay</option><option value="OM_CD">Orange Money</option><option value="AIRTEL_CD">Airtel Money</option><option value="MPESA_CD">M-Pesa</option><option value="AFRICELL_CD">Africell</option></select></label></div><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit" ${window.THINK_SERVER_STATE?.cinetpay?.payin_enabled===true?"":"disabled"}>${window.THINK_SERVER_STATE?.cinetpay?.payin_enabled===true?"Continuer vers CinetPay":"PayIn CinetPay indisponible"}</button></div><p class="wallet-flow-note">Le portefeuille sera crédité uniquement après confirmation du paiement par l'API CinetPay et réception/vérification de sa notification. Montants en CDF entiers, multiple de 5.</p></form><div class="wallet-detail-box"><strong>Autre outil de test local</strong><p>Le crédit fictif ci-dessous ne contacte pas CinetPay et ne représente aucun paiement effectué.</p></div><form id="walletSandboxCreditForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant fictif<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0,00"></label><label class="wallet-form-field">Devise<select name="currency">${Object.keys(walletCurrencies).map(code=>`<option value="${code}" ${code===walletCurrency?"selected":""}>${code}</option>`).join("")}</select></label></div><label class="wallet-form-field">Motif<input name="reason" maxlength="200" placeholder="Test de portefeuille"></label><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Ajouter un solde fictif</button></div></form>`],
         withdraw:["Retirer de l’argent","Choisis l’agence dans laquelle se trouve ton argent.",`<div class="wallet-flow-note"><strong>Choisis parmi nos 13 agences.</strong><span>Think reprend exactement les agences et les logos utilisés dans Transactions.</span></div>${agencyGrid()}<div class="wallet-detail-box"><strong>Étape suivante</strong><p id="walletWithdrawHint">Sélectionne une agence pour afficher le parcours de retrait.</p></div>`],
         balanceView:["Mon solde","Ton solde personnel et sa devise actuelle.",`<div class="wallet-detail-stat-grid"><div class="wallet-detail-stat"><span>Disponible</span><strong id="walletBalanceAvailable">0,00 CDF</strong></div><div class="wallet-detail-stat"><span>Devise</span><strong id="walletBalanceCurrency">CDF</strong></div><div class="wallet-detail-stat"><span>Statut</span><strong>En attente</strong></div></div>`],
         bank:["Compte bancaire","Ajoute un compte et prépare un virement bancaire sécurisé.",`<form class="wallet-form" id="walletBankForm"><div class="wallet-form-row"><label class="wallet-form-field">Titulaire du compte<input required name="holder" autocomplete="name" placeholder="Nom complet"></label><label class="wallet-form-field">Pays<select required name="country"><option>RDC</option><option>France</option><option>États-Unis</option><option>Royaume-Uni</option><option>Autre</option></select></label></div><div class="wallet-form-row"><label class="wallet-form-field">Banque<input required name="bank" autocomplete="organization" placeholder="Nom de la banque"></label><label class="wallet-form-field">Type<select required name="type"><option>Compte courant</option><option>Compte épargne</option></select></label></div><div class="wallet-form-row"><label class="wallet-form-field">IBAN / numéro de compte<input required name="account" autocomplete="off" placeholder="Numéro ou IBAN"></label><label class="wallet-form-field">BIC / SWIFT<input name="swift" autocomplete="off" placeholder="BIC / SWIFT si nécessaire"></label></div><div class="wallet-form-row"><label class="wallet-form-field">Devise<select name="currency"><option>USD</option><option>EUR</option><option>CDF</option><option>GBP</option></select></label><label class="wallet-form-field">Nom du bénéficiaire<input name="beneficiary" autocomplete="name" placeholder="Nom du titulaire"></label></div><div class="wallet-flow-note"><strong>Virement bancaire</strong><span>La validation réelle devra passer par la banque ou un prestataire de paiement connecté et autorisé.</span></div><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Enregistrer le compte</button></div></form>`],
@@ -5829,6 +5851,39 @@ function initWalletInterface(){
       detail.innerHTML=`<div class="wallet-detail-head"><div><div class="wallet-detail-title">${t[0]}</div><div class="wallet-detail-sub">${t[1]}</div></div></div>${t[2]}`;
       const bankForm=$("#walletBankForm");
       if(bankForm) bankForm.addEventListener("submit",event=>{event.preventDefault(); const data=Object.fromEntries(new FormData(bankForm).entries()); localStorage.setItem("think-bank-account",JSON.stringify({bank:data.bank,country:data.country,type:data.type,currency:data.currency,holder:data.holder,accountLast4:String(data.account).slice(-4),swift:data.swift||""})); showToast("Compte bancaire enregistré dans Think. La connexion bancaire réelle devra être autorisée.");});
+      const cinetpayForm=$("#walletCinetPayForm");
+      if(cinetpayForm) {
+        const cinetpayIdempotencyKey="payin-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
+        cinetpayForm.addEventListener("submit",async event=>{
+          event.preventDefault();
+          const button=cinetpayForm.querySelector('button[type="submit"]');
+          const values=Object.fromEntries(new FormData(cinetpayForm).entries());
+          const amount=Number(values.amount);
+          if(!Number.isInteger(amount)||amount<100||amount>2500000||amount%5!==0){
+            showToast("Le montant doit être un entier entre 100 et 2 500 000 CDF, multiple de 5.");
+            return;
+          }
+          button.disabled=true; button.textContent="Connexion à CinetPay…";
+          try{
+            const result=await window.thinkApiRequest("/api/payments/create",{
+              method:"POST",
+              headers:{"Idempotency-Key":cinetpayIdempotencyKey},
+              body:JSON.stringify({
+                purpose:"wallet_deposit",
+                amount:String(amount),
+                currency:"CDF",
+                description:"Depot portefeuille Think",
+                payment_method:values.payment_method||null
+              })
+            });
+            if(!result.payment_url) throw new Error("CinetPay n'a pas retourné de lien de paiement.");
+            window.location.assign(result.payment_url);
+          }catch(error){
+            showToast(error.message||"Impossible de préparer le paiement CinetPay.");
+            button.disabled=false; button.textContent="Réessayer";
+          }
+        });
+      }
       const sandboxCreditForm=$("#walletSandboxCreditForm");
       if(sandboxCreditForm) sandboxCreditForm.addEventListener("submit",async event=>{
         event.preventDefault();
