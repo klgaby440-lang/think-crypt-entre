@@ -221,6 +221,11 @@ jobs:
           assert replay.status_code == 200, replay.text
           assert replay.json()["idempotent_replay"] is True
           assert replay.json()["transfer"]["public_id"] == internal_json["transfer"]["public_id"]
+          mismatched_replay = client.post("/api/internal-transfers", headers=internal_headers, json={
+              **internal_payload,
+              "amount": "2400.00",
+          })
+          assert mismatched_replay.status_code == 409, mismatched_replay.text
 
           # Reject self-transfers and insufficient funds without changing either wallet.
           self_transfer = client.post("/api/internal-transfers", headers=headers, json={
