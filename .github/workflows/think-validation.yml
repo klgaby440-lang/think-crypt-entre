@@ -91,6 +91,7 @@ jobs:
               "payment_transactions",
               "withdrawals",
               "transfers",
+              "internal_transfers",
               "subscriptions",
               "notifications",
           }
@@ -181,17 +182,87 @@ jobs:
           assert withdrawal.json()["withdrawal"]["status"] == "sandbox_pending"
           assert withdrawal.json()["no_real_payout"] is True
 
+          # Create a second independent account to test a real internal ledger move.
+          bob_created = client.post("/api/auth/register", json={
+              "full_name": "Sandbox Recipient",
+              "phone": "+243000000004",
+              "email": "sandbox-recipient@example.test",
+              "password": "SandboxPass456!",
+              "country": "RDC",
+              "currency": "CDF",
+          })
+          assert bob_created.status_code == 200, bob_created.text
+          bob_headers = {"Authorization": f"Bearer {bob_created.json()['access_token']}"}
+          bob_think_id = bob_created.json()["user"]["think_id"]
+          assert bob_think_id != created.json()["user"]["think_id"]
+
+          resolved = client.get(f"/api/internal-transfers/recipient/{bob_think_id}", headers=headers)
+          assert resolved.status_code == 200, resolved.text
+          assert resolved.json()["recipient"]["think_id"] == bob_think_id
+          assert resolved.json()["recipient"]["full_name"] == "Sandbox Recipient"
+
+          internal_payload = {
+              "recipient_think_id": bob_think_id,
+              "amount": "2500.00",
+              "currency": "CDF",
+              "reason": "Alice to Bob internal sandbox test",
+          }
+          internal_headers = {**headers, "Idempotency-Key": "alice-bob-internal-test-001"}
+          internal = client.post("/api/internal-transfers", headers=internal_headers, json=internal_payload)
+          assert internal.status_code == 200, internal.text
+          internal_json = internal.json()
+          assert internal_json["transfer"]["status"] == "sandbox_completed"
+          assert internal_json["transfer"]["direction"] == "sent"
+          assert internal_json["transfer"]["recipient_think_id"] == bob_think_id
+          assert internal_json["no_real_money_moved"] is True
+
+          # Retrying the same request must return the same transfer, not debit twice.
+          replay = client.post("/api/internal-transfers", headers=internal_headers, json=internal_payload)
+          assert replay.status_code == 200, replay.text
+          assert replay.json()["idempotent_replay"] is True
+          assert replay.json()["transfer"]["public_id"] == internal_json["transfer"]["public_id"]
+
+          # Reject self-transfers and insufficient funds without changing either wallet.
+          self_transfer = client.post("/api/internal-transfers", headers=headers, json={
+              "recipient_think_id": created.json()["user"]["think_id"],
+              "amount": "1.00",
+              "currency": "CDF",
+          })
+          assert self_transfer.status_code == 400, self_transfer.text
+          insufficient = client.post("/api/internal-transfers", headers=headers, json={
+              "recipient_think_id": bob_think_id,
+              "amount": "1000000.00",
+              "currency": "CDF",
+          })
+          assert insufficient.status_code == 409, insufficient.text
+
           wallet = client.get("/api/wallet", headers=headers)
           assert wallet.status_code == 200, wallet.text
-          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("8500.0")
+          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("6000.0")
           assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("3500.0")
+
+          bob_wallet = client.get("/api/wallet", headers=bob_headers)
+          assert bob_wallet.status_code == 200, bob_wallet.text
+          assert Decimal(str(bob_wallet.json()["balances"]["CDF"])) == Decimal("2500.0")
+          assert Decimal(str(bob_wallet.json()["reserved_balances"]["CDF"])) == Decimal("0.0")
+
+          alice_internal = client.get("/api/internal-transfers", headers=headers)
+          bob_internal = client.get("/api/internal-transfers", headers=bob_headers)
+          assert alice_internal.status_code == 200 and len(alice_internal.json()["items"]) == 1
+          assert bob_internal.status_code == 200 and len(bob_internal.json()["items"]) == 1
+          assert bob_internal.json()["items"][0]["direction"] == "received"
+          assert bob_internal.json()["items"][0]["sender_think_id"] == created.json()["user"]["think_id"]
+
+          bob_notifications = client.get("/api/notifications", headers=bob_headers)
+          assert bob_notifications.status_code == 200
+          assert any(item["title"] == "Transfert Think reçu" for item in bob_notifications.json()["items"])
 
           transfers = client.get("/api/transfers", headers=headers)
           withdrawals = client.get("/api/withdrawals", headers=headers)
           assert transfers.status_code == 200 and len(transfers.json()["items"]) == 1
           assert withdrawals.status_code == 200 and len(withdrawals.json()["items"]) == 1
 
-          print("Think Sandbox API smoke test OK: register, auth, credit, transfer, withdrawal.")
+          print("Think Sandbox API smoke test OK: signup, auth, credit, external transfer, withdrawal, Alice-to-Bob internal transfer, idempotency, balances, history, notifications.")
           client.close()
           engine.dispose()
           PY
