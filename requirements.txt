@@ -7,3 +7,4 @@ PyJWT
 pwdlib[argon2]
 pydantic-settings
 python-dotenv
+cinetpay-python==0.1.0
