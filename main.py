@@ -1062,18 +1062,39 @@ def create_internal_transfer(
     if not re.fullmatch(r"THK-[A-F0-9]{12}", normalized_think_id):
         raise HTTPException(status_code=422, detail="Identifiant Think invalide.")
 
+    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount < Decimal("1.00"):
+        raise HTTPException(status_code=422, detail="Le montant minimum est de 1 unité.")
+    if amount > Decimal("100000000"):
+        raise HTTPException(status_code=422, detail="Montant Sandbox trop élevé.")
+    reason = data.reason.strip()
+
+    def replay_existing(existing: InternalTransfer):
+        same_request = (
+            existing.recipient.think_id == normalized_think_id
+            and Decimal(existing.amount) == amount
+            and existing.currency == currency
+            and (existing.reason or "") == reason
+        )
+        if not same_request:
+            raise HTTPException(
+                status_code=409,
+                detail="Cette clé d'idempotence a déjà été utilisée pour une autre demande.",
+            )
+        return {
+            "ok": True,
+            "transfer": serialize_internal_transfer(existing, user.id),
+            "test_mode": True,
+            "idempotent_replay": True,
+        }
+
     if idempotency_key:
         existing = db.query(InternalTransfer).filter(
             InternalTransfer.sender_user_id == user.id,
             InternalTransfer.idempotency_key == idempotency_key,
         ).first()
         if existing:
-            return {
-                "ok": True,
-                "transfer": serialize_internal_transfer(existing, user.id),
-                "test_mode": True,
-                "idempotent_replay": True,
-            }
+            return replay_existing(existing)
 
     recipient = db.query(ThinkUser).filter(
         ThinkUser.think_id == normalized_think_id,
@@ -1082,13 +1103,7 @@ def create_internal_transfer(
     if recipient is None:
         raise HTTPException(status_code=404, detail="Le bénéficiaire Think est introuvable ou désactivé.")
     if recipient.id == user.id:
-        raise HTTPException(status_code=400, detail="Tu ne peux pas transférer de l'argent vers ton propre compte.")
-
-    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
-    if amount < Decimal("1.00"):
-        raise HTTPException(status_code=422, detail="Le montant minimum est de 1 unité.")
-    if amount > Decimal("100000000"):
-        raise HTTPException(status_code=422, detail="Montant Sandbox trop élevé.")
+        raise HTTPException(status_code=400, detail="Tu ne peux pas effectuer un transfert vers ton propre compte.")
 
     # Lock both wallet rows in a deterministic order to prevent concurrent
     # transfers from spending the same funds or deadlocking opposite transfers.
@@ -1129,7 +1144,7 @@ def create_internal_transfer(
         currency=currency,
         status="sandbox_completed",
         idempotency_key=idempotency_key,
-        reason=data.reason.strip(),
+        reason=reason,
         extra_data={"test_mode": True, "no_real_money_moved": True},
     )
     db.add(transfer)
@@ -1182,12 +1197,7 @@ def create_internal_transfer(
                 InternalTransfer.idempotency_key == idempotency_key,
             ).first()
             if existing:
-                return {
-                    "ok": True,
-                    "transfer": serialize_internal_transfer(existing, user.id),
-                    "test_mode": True,
-                    "idempotent_replay": True,
-                }
+                return replay_existing(existing)
         raise HTTPException(status_code=409, detail="Le transfert a rencontré un conflit. Vérifie ton historique avant de réessayer.")
 
     db.refresh(transfer)
