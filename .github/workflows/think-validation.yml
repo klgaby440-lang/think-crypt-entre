@@ -287,7 +287,7 @@ jobs:
 
           wallet = client.get("/api/wallet", headers=headers)
           assert wallet.status_code == 200, wallet.text
-          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("7000.0")
+          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("7000.0"), f"Unexpected Alice balance after CinetPay PayIn: {wallet.json()}"
           assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("3500.0")
 
           bob_wallet = client.get("/api/wallet", headers=bob_headers)
