@@ -1486,7 +1486,7 @@ def _payment_return_url(public_id: str, result: str) -> str:
 
 def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
     parsed = urlparse(payment_url or "")
-    expected_host = "secure.cinetpay.net" if mode == "sandbox" else "secure.cinetpay.co"
+    expected_host = "checkout.cinetpay.net" if mode == "sandbox" else "checkout.cinetpay.co"
     if parsed.scheme != "https" or not parsed.hostname or not (
         parsed.hostname == expected_host or parsed.hostname.endswith("." + expected_host)
     ):
