@@ -1422,9 +1422,9 @@ def _cinetpay_environment_status() -> dict[str, Any]:
         payout_state = "active" if _truthy_env("CINETPAY_PAYOUT_ENABLED") else "unknown"
     if payout_state not in {"unknown", "pending", "active", "inactive", "rejected"}:
         payout_state = "unknown"
-    payout_authorized = (
-        payout_state == "active" and _truthy_env("CINETPAY_PAYOUT_ENABLED")
-    )
+    # Provider confirmation and Think's own execution gate are separate facts.
+    payout_authorized = payout_state == "active"
+    payout_gate_requested = _truthy_env("CINETPAY_PAYOUT_ENABLED")
 
     sandbox_state = os.getenv("CINETPAY_SANDBOX_STATUS", "yes").strip().lower()
     sandbox_available = (
@@ -1473,6 +1473,8 @@ def _cinetpay_environment_status() -> dict[str, Any]:
         payout_blockers.append(f"Compte marchand non vérifié ({merchant_state}).")
     if not payout_authorized:
         payout_blockers.append(f"Activation PayOut non confirmée ({payout_state}).")
+    if not payout_gate_requested:
+        payout_blockers.append("Le verrou PayOut Think reste désactivé (CINETPAY_PAYOUT_ENABLED=false).")
     if mode != "production" or app_env != "production":
         payout_blockers.append("Think est configuré en Sandbox, pas en production.")
     if not production_enabled:
@@ -1492,6 +1494,7 @@ def _cinetpay_environment_status() -> dict[str, Any]:
         "payout_mode": "simulation_only",
         "payout_status": payout_state,
         "payout_authorized": payout_authorized,
+        "payout_gate_requested": payout_gate_requested,
         "payout_blockers": payout_blockers,
         "mode": mode if mode in {"sandbox", "production"} else "unknown",
         "app_environment": app_env,
