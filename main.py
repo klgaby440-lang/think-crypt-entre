@@ -32,6 +32,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy.exc import IntegrityError
 from pwdlib import PasswordHash
+from starlette.concurrency import run_in_threadpool
 import jwt
 
 import logging
@@ -1558,11 +1559,11 @@ def _sync_cinetpay_payment_status(
         )
         if wallet_row is None:
             raise HTTPException(status_code=404, detail="Portefeuille du bénéficiaire introuvable.")
-        wallet_row.available_balance = Decimal(wallet_row.available_balance) + Decimal(locked.amount)
         locked.status = "accepted"
         ledger_reference = "CNPIN-" + locked.public_id
         ledger_exists = db.query(LedgerEntry).filter(LedgerEntry.reference == ledger_reference).first()
         if ledger_exists is None:
+            wallet_row.available_balance = Decimal(wallet_row.available_balance) + Decimal(locked.amount)
             db.add(LedgerEntry(
                 wallet_id=wallet_row.id,
                 entry_type="DEPOSIT",
@@ -1808,27 +1809,18 @@ def refresh_payment(
 
 
 @app.api_route("/api/cinetpay/payin/notify", methods=["GET", "POST"])
-def cinetpay_payin_notify(request: Request, db: Session = Depends(get_db)):
+async def cinetpay_payin_notify(request: Request, db: Session = Depends(get_db)):
     # CinetPay also performs a GET availability ping to the notify URL.
     if request.method == "GET":
         return {"ok": True, "service": "cinetpay-payin-notify"}
     try:
         from cinetpay import parse_notification, verify_notification
-
-        body = request.json() if False else None
-    except Exception:
-        raise HTTPException(status_code=503, detail="Le SDK CinetPay est indisponible.") from None
-    try:
-        # Request.json() is async; FastAPI sync routes receive the raw body below.
-        raw_body = request.scope.get("state", {}).get("cinetpay_body")
-    except Exception:
-        raw_body = None
-    if raw_body is None:
-        raise HTTPException(status_code=400, detail="Notification CinetPay invalide.")
-    try:
+        raw_body = await request.json()
         notification = parse_notification(raw_body)
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Le SDK CinetPay est indisponible.") from None
     except Exception:
-        raise HTTPException(status_code=400, detail="Notification CinetPay incomplète.") from None
+        raise HTTPException(status_code=400, detail="Notification CinetPay invalide ou incomplète.") from None
 
     row = db.query(PaymentTransaction).filter(
         PaymentTransaction.merchant_transaction_id == notification.merchant_transaction_id,
@@ -1844,7 +1836,9 @@ def cinetpay_payin_notify(request: Request, db: Session = Depends(get_db)):
 
     client, _ = _require_cinetpay()
     try:
-        provider_status = client.payment.get_status(notification.transaction_id, "CD")
+        provider_status = await run_in_threadpool(
+            client.payment.get_status, notification.transaction_id, "CD"
+        )
     except Exception as exc:
         logger.warning(
             "CinetPay webhook verification failed for %s (%s).",
