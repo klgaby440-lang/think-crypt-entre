@@ -4431,7 +4431,7 @@ function renderTransactionHome() {
     if (!list.dataset.initialized) {
         list.innerHTML = `
             <button class="tx-agency-item tx-internal-item" type="button" data-tx-internal aria-label="Compte Think">
-                <span class="tx-internal-badge" aria-hidden="true">T</span>
+                <span class="tx-internal-badge" aria-hidden="true" style="width:36px;height:36px;flex:0 0 36px;display:inline-grid;place-items:center;border-radius:11px;color:#fff;font-weight:850;background:linear-gradient(135deg,#7357ff,#ff4f81);">T</span>
                 <span class="tx-agency-name">Compte Think</span>
             </button>
         ` + transactionAgencies.map((agency,index)=>`
