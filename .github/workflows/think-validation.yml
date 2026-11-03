@@ -287,7 +287,7 @@ jobs:
 
           wallet = client.get("/api/wallet", headers=headers)
           assert wallet.status_code == 200, wallet.text
-          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("7000.0"), f"Unexpected Alice balance after CinetPay PayIn: {wallet.json()}"
+          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("6000.0"), f"Unexpected Alice balance after Alice-to-Bob transfer: {wallet.json()}"
           assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("3500.0")
 
           bob_wallet = client.get("/api/wallet", headers=bob_headers)
@@ -411,6 +411,11 @@ jobs:
               )
           ).fetchall()
           assert len(payin_ledger_entries) == 1
+
+          wallet_after_payin = client.get("/api/wallet", headers=headers)
+          assert wallet_after_payin.status_code == 200, wallet_after_payin.text
+          assert Decimal(str(wallet_after_payin.json()["balances"]["CDF"])) == Decimal("7000.0"), wallet_after_payin.json()
+          assert Decimal(str(wallet_after_payin.json()["reserved_balances"]["CDF"])) == Decimal("3500.0"), wallet_after_payin.json()
 
           # Verify missing/disabled PayIn configuration fails closed.
           os.environ["CINETPAY_ENABLED"] = "false"
