@@ -1833,6 +1833,9 @@ async def cinetpay_payin_notify(request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Jeton de notification CinetPay invalide.")
     if row.provider_transaction_id and row.provider_transaction_id != notification.transaction_id:
         raise HTTPException(status_code=409, detail="Référence prestataire incohérente.")
+    if row.status == "accepted":
+        # A verified payment is immutable; repeated notifications need no provider call.
+        return {"ok": True, "public_id": row.public_id, "status": row.status, "duplicate": True}
 
     client, _ = _require_cinetpay()
     try:
