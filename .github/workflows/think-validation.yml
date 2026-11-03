@@ -75,6 +75,26 @@ jobs:
           print(f"JavaScript syntax OK: {len(parser.scripts)} inline scripts.")
           PY
 
+      - name: Verify official CinetPay SDK and DRC methods
+        run: |
+          python - <<'PY'
+          import cinetpay
+          from cinetpay import CinetPayClient, ClientConfig, CountryCredentials
+          from cinetpay import COUNTRY_CODES, PAYMENT_METHODS_BY_COUNTRY
+
+          assert cinetpay.__version__ == "0.1.0"
+          assert "CD" in COUNTRY_CODES
+          assert set(PAYMENT_METHODS_BY_COUNTRY["CD"]) == {
+              "OM_CD", "AIRTEL_CD", "MPESA_CD", "AFRICELL_CD"
+          }
+          client = CinetPayClient(ClientConfig(credentials={
+              "CD": CountryCredentials(api_key="sk_test_ci_only", api_password="ci-test-password")
+          }))
+          assert client.countries() == ["CD"]
+          client.close()
+          print("Official CinetPay v1 SDK loaded; DRC (CD) and all four payment methods are available.")
+          PY
+
       - name: Validate SQLAlchemy model mappings
         run: |
           python - <<'PY'
@@ -279,7 +299,7 @@ jobs:
           assert cinetpay_status.json()["mode"] == "sandbox"
 
           fake_payment_response = SimpleNamespace(
-              payment_url="https://secure.cinetpay.net/checkout/test-payment",
+              payment_url="https://checkout.cinetpay.net/pay/test-payment",
               notify_token="ci-notify-token",
               transaction_id="ci-cinetpay-transaction-001",
               payment_token="ci-payment-token",
