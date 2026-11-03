@@ -115,6 +115,11 @@ jobs:
 
           os.environ["JWT_SECRET"] = "ci-test-secret-" + ("x" * 64)
           os.environ["APP_ENV"] = "sandbox"
+          os.environ["CINETPAY_ENABLED"] = "true"
+          os.environ["CINETPAY_MODE"] = "sandbox"
+          os.environ["CINETPAY_API_KEY_CD"] = "sk_test_ci_only"
+          os.environ["CINETPAY_API_PASSWORD_CD"] = "ci-test-password"
+          os.environ["CINETPAY_CURRENCY"] = "CDF"
 
           import main
 
@@ -243,7 +248,7 @@ jobs:
 
           wallet = client.get("/api/wallet", headers=headers)
           assert wallet.status_code == 200, wallet.text
-          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("6000.0")
+          assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("7000.0")
           assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("3500.0")
 
           bob_wallet = client.get("/api/wallet", headers=bob_headers)
@@ -262,12 +267,126 @@ jobs:
           assert bob_notifications.status_code == 200
           assert any(item["title"] == "Transfert Think reçu" for item in bob_notifications.json()["items"])
 
+          # Mock the official CinetPay v1 SDK: test the complete PayIn lifecycle
+          # without making external requests or moving real money.
+          from types import SimpleNamespace
+          from unittest.mock import Mock, patch
+
+          cinetpay_status = client.get("/api/cinetpay/status", headers=headers)
+          assert cinetpay_status.status_code == 200, cinetpay_status.text
+          assert cinetpay_status.json()["payin_enabled"] is True
+          assert cinetpay_status.json()["payout_enabled"] is False
+          assert cinetpay_status.json()["mode"] == "sandbox"
+
+          fake_payment_response = SimpleNamespace(
+              payment_url="https://secure.cinetpay.net/checkout/test-payment",
+              notify_token="ci-notify-token",
+              transaction_id="ci-cinetpay-transaction-001",
+              payment_token="ci-payment-token",
+              status="OK",
+          )
+          fake_provider_status = SimpleNamespace(
+              status="SUCCESS",
+              merchant_transaction_id=None,  # Filled after payment initialization.
+              transaction_id="ci-cinetpay-transaction-001",
+          )
+          fake_payment_api = SimpleNamespace(
+              initialize=Mock(return_value=fake_payment_response),
+              get_status=Mock(),
+          )
+          fake_cinetpay = SimpleNamespace(payment=fake_payment_api)
+          payin_config = {
+              "mode": "sandbox",
+              "currency": "CDF",
+              "payin_enabled": True,
+              "payout_enabled": False,
+              "merchant_verified": False,
+          }
+          payin_payload = {
+              "purpose": "wallet_deposit",
+              "amount": "1000",
+              "currency": "CDF",
+              "description": "Test dépôt CinetPay",
+              "payment_method": "OM_CD",
+          }
+          payin_headers = {**headers, "Idempotency-Key": "alice-cinetpay-payin-001"}
+          with patch.object(main, "_require_cinetpay", return_value=(fake_cinetpay, payin_config)):
+              payin = client.post("/api/payments/create", headers=payin_headers, json=payin_payload)
+              assert payin.status_code == 200, payin.text
+              payin_json = payin.json()
+              assert payin_json["provider"] == "cinetpay_v1"
+              assert payin_json["status"] == "pending"
+              assert payin_json["test_mode"] is True
+              assert payin_json["payment_url"] == fake_payment_response.payment_url
+              assert "notify_token" not in payin.text
+              assert fake_payment_api.initialize.call_count == 1
+
+              # Same key and payload returns the same checkout without creating another one.
+              payin_replay = client.post("/api/payments/create", headers=payin_headers, json=payin_payload)
+              assert payin_replay.status_code == 200, payin_replay.text
+              assert payin_replay.json()["idempotent_replay"] is True
+              assert payin_replay.json()["public_id"] == payin_json["public_id"]
+              assert fake_payment_api.initialize.call_count == 1
+
+              # A different payload may not reuse the same idempotency key.
+              payin_mismatch = client.post("/api/payments/create", headers=payin_headers, json={
+                  **payin_payload,
+                  "amount": "1005",
+              })
+              assert payin_mismatch.status_code == 409, payin_mismatch.text
+
+              # A forged notification token must be rejected before querying the provider.
+              notification_payload = {
+                  "notify_token": "wrong-token",
+                  "merchant_transaction_id": payin_json["merchant_transaction_id"],
+                  "transaction_id": "ci-cinetpay-transaction-001",
+              }
+              forged = client.post("/api/cinetpay/payin/notify", json=notification_payload)
+              assert forged.status_code == 401, forged.text
+              assert fake_payment_api.get_status.call_count == 0
+
+              # Only a provider-side SUCCESS can credit the wallet.
+              fake_provider_status.merchant_transaction_id = payin_json["merchant_transaction_id"]
+              fake_payment_api.get_status.return_value = fake_provider_status
+              notification_payload["notify_token"] = "ci-notify-token"
+              notification = client.post("/api/cinetpay/payin/notify", json=notification_payload)
+              assert notification.status_code == 200, notification.text
+              assert notification.json()["status"] == "accepted"
+
+              # Replayed webhook must not credit twice.
+              duplicate_notification = client.post("/api/cinetpay/payin/notify", json=notification_payload)
+              assert duplicate_notification.status_code == 200, duplicate_notification.text
+              assert duplicate_notification.json()["status"] == "accepted"
+              assert fake_payment_api.get_status.call_count == 1
+
+              # A user can inspect only their own payment records.
+              alice_payments = client.get("/api/payments", headers=headers)
+              bob_payments = client.get("/api/payments", headers=bob_headers)
+              assert alice_payments.status_code == 200 and len(alice_payments.json()["items"]) == 1
+              assert alice_payments.json()["items"][0]["status"] == "accepted"
+              assert bob_payments.status_code == 200 and bob_payments.json()["items"] == []
+
+          payin_ledger_entries = engine.connect().execute(
+              main.LedgerEntry.__table__.select().where(
+                  main.LedgerEntry.reference == "CNPIN-" + payin_json["public_id"]
+              )
+          ).fetchall()
+          assert len(payin_ledger_entries) == 1
+
+          # Verify missing/disabled PayIn configuration fails closed.
+          os.environ["CINETPAY_ENABLED"] = "false"
+          disabled_payin = client.post("/api/payments/create", headers={
+              **headers, "Idempotency-Key": "alice-cinetpay-disabled-001"
+          }, json=payin_payload)
+          assert disabled_payin.status_code == 503, disabled_payin.text
+          os.environ["CINETPAY_ENABLED"] = "true"
+
           transfers = client.get("/api/transfers", headers=headers)
           withdrawals = client.get("/api/withdrawals", headers=headers)
           assert transfers.status_code == 200 and len(transfers.json()["items"]) == 1
           assert withdrawals.status_code == 200 and len(withdrawals.json()["items"]) == 1
 
-          print("Think Sandbox API smoke test OK: signup, auth, credit, external transfer, withdrawal, Alice-to-Bob internal transfer, idempotency, balances, history, notifications.")
+          print("Think Sandbox API smoke test OK: signup, auth, credit, external transfer, withdrawal, Alice-to-Bob internal transfer, mocked CinetPay PayIn, verified webhook, duplicate webhook protection, idempotency, balances, history, notifications.")
           client.close()
           engine.dispose()
           PY
