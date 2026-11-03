@@ -1395,13 +1395,43 @@ def _truthy_env(name: str, default: str = "false") -> bool:
 
 
 def _cinetpay_environment_status() -> dict[str, Any]:
+    """Expose a safe, secret-free view of CinetPay readiness for Think.
+
+    PayIn can run with test credentials in Sandbox while merchant verification
+    is pending. PayOut remains disabled until the merchant and transfer service
+    are explicitly confirmed by CinetPay and Think's production gate is opened.
+    """
     mode = os.getenv("CINETPAY_MODE", "sandbox").strip().lower()
     api_key = os.getenv("CINETPAY_API_KEY_CD", "").strip()
     api_password = os.getenv("CINETPAY_API_PASSWORD_CD", "").strip()
     app_env = os.getenv("APP_ENV", "sandbox").strip().lower()
     enabled = _truthy_env("CINETPAY_ENABLED")
-    merchant_verified = _truthy_env("CINETPAY_MERCHANT_VERIFIED")
-    payout_enabled = _truthy_env("CINETPAY_PAYOUT_ENABLED")
+    production_enabled = _truthy_env("CINETPAY_PRODUCTION_ENABLED")
+
+    # Keep compatibility with the previous boolean settings while exposing
+    # the more precise merchant states shown in the CinetPay dashboard.
+    merchant_state = os.getenv("CINETPAY_MERCHANT_VERIFICATION_STATUS", "").strip().lower()
+    if not merchant_state:
+        merchant_state = "verified" if _truthy_env("CINETPAY_MERCHANT_VERIFIED") else "pending"
+    if merchant_state not in {"pending", "verified", "rejected", "unknown"}:
+        merchant_state = "unknown"
+    merchant_verified = merchant_state == "verified"
+
+    payout_state = os.getenv("CINETPAY_PAYOUT_STATUS", "").strip().lower()
+    if not payout_state:
+        payout_state = "active" if _truthy_env("CINETPAY_PAYOUT_ENABLED") else "unknown"
+    if payout_state not in {"unknown", "pending", "active", "inactive", "rejected"}:
+        payout_state = "unknown"
+    payout_authorized = (
+        payout_state == "active" and _truthy_env("CINETPAY_PAYOUT_ENABLED")
+    )
+
+    sandbox_state = os.getenv("CINETPAY_SANDBOX_STATUS", "yes").strip().lower()
+    sandbox_available = (
+        sandbox_state in {"1", "true", "yes", "on"}
+        and mode == "sandbox"
+        and app_env == "sandbox"
+    )
 
     ready = enabled and bool(api_key and api_password)
     message = "CinetPay n'est pas encore configuré."
@@ -1409,21 +1439,21 @@ def _cinetpay_environment_status() -> dict[str, Any]:
         message = "PayIn CinetPay est désactivé. Active CINETPAY_ENABLED après avoir configuré les clés Sandbox."
     elif not api_key or not api_password:
         ready = False
-        message = "Les clés API Sandbox du pays CD sont manquantes."
+        message = "Les clés API CinetPay du pays CD sont manquantes."
     elif mode == "sandbox":
-        if not api_key.startswith("sk_test_"):
+        if not sandbox_available:
+            ready = False
+            message = "Le Sandbox n'est pas activé ou APP_ENV n'est pas réglé sur sandbox."
+        elif not api_key.startswith("sk_test_"):
             ready = False
             message = "Le mode Sandbox exige une clé CinetPay commençant par sk_test_."
-        elif app_env != "sandbox":
-            ready = False
-            message = "Le Sandbox CinetPay ne peut fonctionner que lorsque APP_ENV=sandbox."
         else:
-            message = "PayIn CinetPay Sandbox est prêt."
+            message = "PayIn CinetPay Sandbox est prêt. La vérification marchande pending ne bloque pas les essais Sandbox."
     elif mode == "production":
         if not merchant_verified:
             ready = False
-            message = "La production est bloquée : le compte marchand CRYPT n'est pas encore vérifié."
-        elif not _truthy_env("CINETPAY_PRODUCTION_ENABLED"):
+            message = f"La production est bloquée : vérification marchande {merchant_state}."
+        elif not production_enabled:
             ready = False
             message = "La production est verrouillée. CINETPAY_PRODUCTION_ENABLED doit être activé après validation."
         elif not api_key.startswith("sk_live_"):
@@ -1438,15 +1468,40 @@ def _cinetpay_environment_status() -> dict[str, Any]:
         ready = False
         message = "CINETPAY_MODE doit être sandbox ou production."
 
+    payout_blockers: list[str] = []
+    if not merchant_verified:
+        payout_blockers.append(f"Compte marchand non vérifié ({merchant_state}).")
+    if not payout_authorized:
+        payout_blockers.append(f"Activation PayOut non confirmée ({payout_state}).")
+    if mode != "production" or app_env != "production":
+        payout_blockers.append("Think est configuré en Sandbox, pas en production.")
+    if not production_enabled:
+        payout_blockers.append("La bascule de production reste désactivée.")
+    if not api_key.startswith("sk_live_"):
+        payout_blockers.append("Une clé API de production n'est pas configurée.")
+    # Even when CinetPay authorizes transfers, this API deliberately keeps
+    # user withdrawals in simulation until a separately reviewed live payout
+    # workflow (reservation, provider verification and reversal) is enabled.
+    payout_blockers.append("L'exécution PayOut réelle n'est pas activée dans Think.")
+
     return {
         "enabled": ready,
         "payin_enabled": ready,
-        "payout_enabled": False,  # PayOut stays blocked until CinetPay confirms activation.
+        "payout_enabled": False,
+        "payout_real_available": False,
+        "payout_mode": "simulation_only",
+        "payout_status": payout_state,
+        "payout_authorized": payout_authorized,
+        "payout_blockers": payout_blockers,
         "mode": mode if mode in {"sandbox", "production"} else "unknown",
+        "app_environment": app_env,
         "country": "CD",
         "currency": os.getenv("CINETPAY_CURRENCY", "CDF").strip().upper(),
         "merchant_verified": merchant_verified,
-        "payout_authorized": payout_enabled,
+        "merchant_verification_status": merchant_state,
+        "sandbox_status": "yes" if sandbox_available else "no",
+        "sandbox_available": sandbox_available,
+        "production_enabled": production_enabled,
         "message": message,
     }
 
