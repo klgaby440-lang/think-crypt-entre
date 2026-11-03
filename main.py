@@ -22,6 +22,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    or_,
     create_engine,
     text,
 )
@@ -207,6 +208,37 @@ class Transfer(Base):
 
     user = relationship("ThinkUser", back_populates="transfers")
     source_wallet = relationship("Wallet")
+
+
+
+class InternalTransfer(Base):
+    __tablename__ = "internal_transfers"
+    __table_args__ = (
+        UniqueConstraint(
+            "sender_user_id", "idempotency_key",
+            name="uq_internal_transfer_sender_idempotency",
+        ),
+        CheckConstraint("amount > 0", name="ck_internal_transfer_amount_positive"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String(64), nullable=False, unique=True, index=True)
+    sender_user_id = Column(Integer, ForeignKey("think_users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    recipient_user_id = Column(Integer, ForeignKey("think_users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    source_wallet_id = Column(Integer, ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    destination_wallet_id = Column(Integer, ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=False, index=True)
+    amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False)
+    status = Column(String(32), nullable=False, default="sandbox_completed")
+    idempotency_key = Column(String(128), nullable=True)
+    reason = Column(Text, nullable=True)
+    extra_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    sender = relationship("ThinkUser", foreign_keys=[sender_user_id])
+    recipient = relationship("ThinkUser", foreign_keys=[recipient_user_id])
+    source_wallet = relationship("Wallet", foreign_keys=[source_wallet_id])
+    destination_wallet = relationship("Wallet", foreign_keys=[destination_wallet_id])
 
 
 class Subscription(Base):
@@ -425,6 +457,14 @@ class TransferData(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+
+class InternalTransferData(BaseModel):
+    recipient_think_id: str = Field(min_length=8, max_length=32)
+    amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(min_length=3, max_length=3)
+    reason: str = Field(default="", max_length=500)
+
+
 class SubscriptionData(BaseModel):
     plan: str = Field(min_length=2, max_length=40)
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
@@ -557,6 +597,28 @@ def serialize_transfer(item: Transfer) -> dict[str, Any]:
         "date": item.created_at.strftime("%d/%m/%Y") if item.created_at else "",
         "time": item.created_at.strftime("%H:%M") if item.created_at else "",
         "notificationText": message,
+    }
+
+
+
+def serialize_internal_transfer(item: InternalTransfer, current_user_id: int) -> dict[str, Any]:
+    created = item.created_at.isoformat() if item.created_at else None
+    outgoing = item.sender_user_id == current_user_id
+    return {
+        "id": item.id,
+        "public_id": item.public_id,
+        "status": item.status,
+        "direction": "sent" if outgoing else "received",
+        "sender_think_id": item.sender.think_id,
+        "sender_name": item.sender.full_name,
+        "recipient_think_id": item.recipient.think_id,
+        "recipient_name": item.recipient.full_name,
+        "amount": float(item.amount),
+        "currency": item.currency,
+        "fee": 0.0,
+        "reason": item.reason or "",
+        "created_at": created,
+        "no_real_money_moved": True,
     }
 
 
@@ -923,6 +985,219 @@ def transfers(db: Session = Depends(get_db), user: ThinkUser = Depends(get_curre
         .order_by(Transfer.created_at.desc()).limit(100).all()
     )
     return {"items": [serialize_transfer(row) for row in rows]}
+
+
+@app.get("/api/internal-transfers/recipient/{think_id}")
+def resolve_internal_transfer_recipient(
+    think_id: str,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    """Resolve a public Think ID without exposing private account details."""
+    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
+        raise HTTPException(status_code=404, detail="Les transferts internes Sandbox sont désactivés.")
+    normalized = think_id.strip().upper()
+    if not re.fullmatch(r"THK-[A-F0-9]{12}", normalized):
+        raise HTTPException(status_code=422, detail="Entre un identifiant Think valide (THK-...).")
+    recipient = db.query(ThinkUser).filter(
+        ThinkUser.think_id == normalized,
+        ThinkUser.is_active.is_(True),
+    ).first()
+    if recipient is None:
+        raise HTTPException(status_code=404, detail="Aucun compte Think actif ne correspond à cet identifiant.")
+    if recipient.id == user.id:
+        raise HTTPException(status_code=400, detail="Tu ne peux pas effectuer un transfert vers ton propre compte.")
+    return {
+        "recipient": {
+            "think_id": recipient.think_id,
+            "full_name": recipient.full_name,
+        },
+        "test_mode": True,
+    }
+
+
+@app.get("/api/internal-transfers")
+def internal_transfers(
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
+        raise HTTPException(status_code=404, detail="Les transferts internes Sandbox sont désactivés.")
+    rows = (
+        db.query(InternalTransfer)
+        .filter(or_(
+            InternalTransfer.sender_user_id == user.id,
+            InternalTransfer.recipient_user_id == user.id,
+        ))
+        .order_by(InternalTransfer.created_at.desc(), InternalTransfer.id.desc())
+        .limit(100)
+        .all()
+    )
+    return {
+        "items": [serialize_internal_transfer(row, user.id) for row in rows],
+        "test_mode": True,
+    }
+
+
+@app.post("/api/internal-transfers")
+def create_internal_transfer(
+    data: InternalTransferData,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    """Instantly move Sandbox balance between two Think wallets in one DB transaction."""
+    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
+        raise HTTPException(status_code=404, detail="Les transferts internes Sandbox sont désactivés.")
+
+    currency = data.currency.strip().upper()
+    if currency not in ALLOWED_CURRENCIES:
+        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
+    if idempotency_key is not None:
+        idempotency_key = idempotency_key.strip()
+        if not idempotency_key or len(idempotency_key) > 128:
+            raise HTTPException(status_code=422, detail="Clé d'idempotence invalide.")
+
+    normalized_think_id = data.recipient_think_id.strip().upper()
+    if not re.fullmatch(r"THK-[A-F0-9]{12}", normalized_think_id):
+        raise HTTPException(status_code=422, detail="Identifiant Think invalide.")
+
+    if idempotency_key:
+        existing = db.query(InternalTransfer).filter(
+            InternalTransfer.sender_user_id == user.id,
+            InternalTransfer.idempotency_key == idempotency_key,
+        ).first()
+        if existing:
+            return {
+                "ok": True,
+                "transfer": serialize_internal_transfer(existing, user.id),
+                "test_mode": True,
+                "idempotent_replay": True,
+            }
+
+    recipient = db.query(ThinkUser).filter(
+        ThinkUser.think_id == normalized_think_id,
+        ThinkUser.is_active.is_(True),
+    ).first()
+    if recipient is None:
+        raise HTTPException(status_code=404, detail="Le bénéficiaire Think est introuvable ou désactivé.")
+    if recipient.id == user.id:
+        raise HTTPException(status_code=400, detail="Tu ne peux pas transférer de l'argent vers ton propre compte.")
+
+    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount < Decimal("1.00"):
+        raise HTTPException(status_code=422, detail="Le montant minimum est de 1 unité.")
+    if amount > Decimal("100000000"):
+        raise HTTPException(status_code=422, detail="Montant Sandbox trop élevé.")
+
+    # Lock both wallet rows in a deterministic order to prevent concurrent
+    # transfers from spending the same funds or deadlocking opposite transfers.
+    wallet_rows = (
+        db.query(Wallet)
+        .filter(
+            Wallet.user_id.in_([user.id, recipient.id]),
+            Wallet.currency == currency,
+        )
+        .order_by(Wallet.id.asc())
+        .with_for_update()
+        .all()
+    )
+    wallets_by_user = {row.user_id: row for row in wallet_rows}
+    source_wallet = wallets_by_user.get(user.id)
+    destination_wallet = wallets_by_user.get(recipient.id)
+    if source_wallet is None or destination_wallet is None:
+        raise HTTPException(status_code=404, detail="Portefeuille introuvable pour cette devise.")
+
+    available = Decimal(source_wallet.available_balance)
+    if available < amount:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Solde insuffisant. Disponible : {available} {currency}.",
+        )
+
+    public_id = "THI-" + uuid4().hex[:16].upper()
+    source_wallet.available_balance = available - amount
+    destination_wallet.available_balance = Decimal(destination_wallet.available_balance) + amount
+
+    transfer = InternalTransfer(
+        public_id=public_id,
+        sender_user_id=user.id,
+        recipient_user_id=recipient.id,
+        source_wallet_id=source_wallet.id,
+        destination_wallet_id=destination_wallet.id,
+        amount=amount,
+        currency=currency,
+        status="sandbox_completed",
+        idempotency_key=idempotency_key,
+        reason=data.reason.strip(),
+        extra_data={"test_mode": True, "no_real_money_moved": True},
+    )
+    db.add(transfer)
+    db.flush()
+
+    db.add_all([
+        LedgerEntry(
+            wallet_id=source_wallet.id,
+            entry_type="INTERNAL_TRANSFER_OUT",
+            amount=-amount,
+            currency=currency,
+            status="sandbox_completed",
+            reference=public_id + "-OUT",
+            related_type="internal_transfer",
+            related_id=str(transfer.id),
+            description=f"Transfert Sandbox envoyé à {recipient.think_id}.",
+            extra_data={"no_real_money_moved": True},
+        ),
+        LedgerEntry(
+            wallet_id=destination_wallet.id,
+            entry_type="INTERNAL_TRANSFER_IN",
+            amount=amount,
+            currency=currency,
+            status="sandbox_completed",
+            reference=public_id + "-IN",
+            related_type="internal_transfer",
+            related_id=str(transfer.id),
+            description=f"Transfert Sandbox reçu de {user.think_id}.",
+            extra_data={"no_real_money_moved": True},
+        ),
+    ])
+    notify_user(
+        db, user.id, "Transfert Think envoyé",
+        f"Transfert Sandbox {public_id} : {amount} {currency} envoyés à {recipient.full_name} ({recipient.think_id}). Aucun argent réel n'a été déplacé.",
+        "finance",
+    )
+    notify_user(
+        db, recipient.id, "Transfert Think reçu",
+        f"Tu as reçu {amount} {currency} de {user.full_name} ({user.think_id}) via le Sandbox Think. Aucun argent réel n'a été déplacé.",
+        "finance",
+    )
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key:
+            existing = db.query(InternalTransfer).filter(
+                InternalTransfer.sender_user_id == user.id,
+                InternalTransfer.idempotency_key == idempotency_key,
+            ).first()
+            if existing:
+                return {
+                    "ok": True,
+                    "transfer": serialize_internal_transfer(existing, user.id),
+                    "test_mode": True,
+                    "idempotent_replay": True,
+                }
+        raise HTTPException(status_code=409, detail="Le transfert a rencontré un conflit. Vérifie ton historique avant de réessayer.")
+
+    db.refresh(transfer)
+    return {
+        "ok": True,
+        "transfer": serialize_internal_transfer(transfer, user.id),
+        "test_mode": True,
+        "no_real_money_moved": True,
+        "idempotent_replay": False,
+    }
 
 
 @app.post("/api/transfers")
