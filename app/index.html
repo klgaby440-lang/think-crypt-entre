@@ -2247,18 +2247,20 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
 
   window.thinkApiHydrate = async function () {
     if (!window.thinkApiGetToken()) return null;
-    const [me, wallet, transfers, withdrawals, notifications, subscription] = await Promise.all([
+    const [me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription] = await Promise.all([
       window.thinkApiRequest("/api/me"),
       window.thinkApiRequest("/api/wallet"),
       window.thinkApiRequest("/api/transfers"),
+      window.thinkApiRequest("/api/internal-transfers"),
       window.thinkApiRequest("/api/withdrawals"),
       window.thinkApiRequest("/api/notifications"),
       window.thinkApiRequest("/api/subscriptions")
     ]);
-    const state = { me, wallet, transfers, withdrawals, notifications, subscription, loadedAt: Date.now() };
+    const state = { me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription, loadedAt: Date.now() };
     window.THINK_SERVER_STATE = state;
     try {
       localStorage.setItem("think-transfer-history", JSON.stringify(transfers.items || []));
+      localStorage.setItem("think-internal-transfer-history", JSON.stringify(internalTransfers.items || []));
       localStorage.setItem("think-withdrawal-history", JSON.stringify(withdrawals.items || []));
       localStorage.setItem("think-notification-items", JSON.stringify(notifications.items || []));
       localStorage.setItem("think-subscription-server", JSON.stringify(subscription || {}));
@@ -3464,7 +3466,16 @@ function thinkGetMovementRecords(){
       movementLabel:`Demande de retrait de ${item.amount} ${item.currency} vers ${item.operator||"opérateur"}`,
       movementDate:item.created_at||item.createdAt||""
     }));
-    return [...transfers,...withdrawals].sort((a,b)=>Date.parse(b.movementDate||0)-Date.parse(a.movementDate||0));
+    const internal=(server.internalTransfers?.items||[]).map(item=>({
+      ...item,
+      movementType:item.direction==="sent"?"Transfert Think envoyé":"Transfert Think reçu",
+      movementLabel:item.direction==="sent"
+        ? `Envoyé à ${item.recipient_name||item.recipient_think_id}`
+        : `Reçu de ${item.sender_name||item.sender_think_id}`,
+      notificationText:`${item.amount} ${item.currency} · ${item.status} · Sandbox`,
+      movementDate:item.created_at||""
+    }));
+    return [...transfers,...withdrawals,...internal].sort((a,b)=>Date.parse(b.movementDate||0)-Date.parse(a.movementDate||0));
 }
 function thinkSaveTransfers(items){ localStorage.setItem(THINK_TRANSFER_KEY, JSON.stringify(items.slice(-100))); }
 function thinkGetNotifications(){
@@ -4418,23 +4429,37 @@ function renderTransactionHome() {
     const main = $("#txMain");
     if (!list || !main) return;
     if (!list.dataset.initialized) {
-        list.innerHTML = transactionAgencies.map((agency,index)=>`
+        list.innerHTML = `
+            <button class="tx-agency-item tx-internal-item" type="button" data-tx-internal aria-label="Compte Think">
+                <span class="tx-internal-badge" aria-hidden="true">T</span>
+                <span class="tx-agency-name">Compte Think</span>
+            </button>
+        ` + transactionAgencies.map((agency,index)=>`
             <button class="tx-agency-item ${index===selectedTransactionAgency?"active":""}" type="button" data-tx-agency="${index}" aria-label="${agency.name}">${txLogo(agency)}<span class="tx-agency-name">${agency.name}</span></button>
         `).join("");
         list.addEventListener("click",event=>{
+            const internalButton=event.target.closest("[data-tx-internal]");
+            if(internalButton && list.contains(internalButton)){
+                selectedTransactionAgency=null;
+                list.querySelectorAll("[data-tx-agency], [data-tx-internal]").forEach(b=>b.classList.toggle("active",b===internalButton));
+                renderInternalTransferForm();
+                applyLanguage();
+                return;
+            }
             const button=event.target.closest("[data-tx-agency]");
             if(!button || !list.contains(button)) return;
             selectedTransactionAgency=Number(button.dataset.txAgency);
-            list.querySelectorAll("[data-tx-agency]").forEach(b=>b.classList.toggle("active",b===button));
+            list.querySelectorAll("[data-tx-agency], [data-tx-internal]").forEach(b=>b.classList.toggle("active",b===button));
             renderTransactionHome();
             applyLanguage();
         });
         list.dataset.initialized="1";
     } else {
         list.querySelectorAll("[data-tx-agency]").forEach(b=>b.classList.toggle("active",Number(b.dataset.txAgency)===selectedTransactionAgency));
+        list.querySelectorAll("[data-tx-internal]").forEach(b=>b.classList.remove("active"));
     }
     if(selectedTransactionAgency===null){
-        main.innerHTML=`<div class="tx-empty"><div><strong>Choisis une agence</strong><br><span>Sélectionne une agence à gauche pour afficher les options.</span></div></div>`;
+        main.innerHTML=`<div class="tx-empty"><div><strong>Choisis un service</strong><br><span>Compte Think pour envoyer à un autre utilisateur, ou une agence pour un transfert externe.</span></div></div>`;
         applyLanguage(); return;
     }
     const agency=transactionAgencies[selectedTransactionAgency];
@@ -4453,6 +4478,152 @@ document.addEventListener("click",event=>{
     const txMode=event.target.closest("#txMain [data-tx-mode]");
     if(txMode){event.preventDefault();event.stopPropagation();renderTransactionForm(txMode.dataset.txMode);}
 });
+
+
+function txEscapeHtml(value){
+    return String(value??"").replace(/[&<>"']/g,character=>({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[character]));
+}
+
+function renderInternalTransferHistoryMarkup(){
+    const items=window.THINK_SERVER_STATE?.internalTransfers?.items||[];
+    if(!items.length) return `<div class="tx-info"><strong>Historique Think</strong><br>Aucun transfert interne pour le moment.</div>`;
+    return `<div class="tx-info"><strong>Historique des transferts Think</strong><div style="display:grid;gap:9px;margin-top:10px;">${items.slice(0,8).map(item=>{
+        const sent=item.direction==="sent";
+        const otherName=sent?(item.recipient_name||item.recipient_think_id):(item.sender_name||item.sender_think_id);
+        const label=sent?"Envoyé à":"Reçu de";
+        const sign=sent?"−":"+";
+        return `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid var(--line);padding-top:8px;">
+            <span><strong>${label} ${txEscapeHtml(otherName)}</strong><br><small>${txEscapeHtml(item.public_id)} · ${txEscapeHtml(item.status)} · Sandbox</small></span>
+            <strong>${sign}${thinkMoney(item.amount,item.currency)}</strong>
+        </div>`;
+    }).join("")}</div></div>`;
+}
+
+function renderInternalTransferForm(){
+    const main=$("#txMain");
+    if(!main) return;
+    const me=window.THINK_SERVER_STATE?.me||{};
+    const ownId=me.think_id||"";
+    const balance=window.THINK_SERVER_STATE?.wallet?.balances||{};
+    const currency=localStorage.getItem("think-transfer-currency")||localStorage.getItem("think-wallet-currency")||"CDF";
+    const currencies=THINK_TRANSFER_CURRENCIES.map(item=>item.code);
+    const options=currencies.map(code=>`<option value="${code}" ${code===currency?"selected":""}>${code}</option>`).join("");
+    main.innerHTML=`
+        <button class="tx-back" type="button" id="txInternalBack"><span>‹</span><span>Retour</span></button>
+        <div class="tx-selected-head">
+            <div class="tx-selected-logo" style="font-weight:800;font-size:24px;">T</div>
+            <div><div class="tx-selected-name">Transfert entre comptes Think</div><div class="tx-selected-type">Envoi instantané en Sandbox, sans argent réel.</div></div>
+        </div>
+        <div class="tx-form">
+            <div class="tx-info"><strong>Ton identifiant Think</strong><br><span>${txEscapeHtml(ownId||"Indisponible")}</span><br><small>Partage cet identifiant pour recevoir un transfert.</small></div>
+            <div class="tx-field"><label>Identifiant Think du bénéficiaire</label><input id="txInternalRecipientId" type="text" autocomplete="off" maxlength="32" placeholder="THK-XXXXXXXXXXXX"></div>
+            <button class="tx-option" type="button" id="txInternalLookup" style="width:100%;justify-content:center;">Vérifier le bénéficiaire</button>
+            <div id="txInternalRecipientState" class="tx-info" aria-live="polite">Vérifie le Think ID avant de préparer le transfert.</div>
+            <div class="tx-field"><label>Devise</label><select id="txInternalCurrency">${options}</select></div>
+            <div class="tx-field"><label>Montant à envoyer</label><input id="txInternalAmount" type="number" inputmode="decimal" min="1" step="0.01" placeholder="0,00"></div>
+            <div id="txInternalBalance" class="tx-info">Solde disponible : ${thinkMoney(balance[currency]||0,currency)} · Frais Think : 0</div>
+            <div class="tx-field"><label>Motif (facultatif)</label><input id="txInternalReason" type="text" maxlength="500" placeholder="Motif du transfert"></div>
+            <button class="tx-primary" type="button" id="txInternalContinue" disabled>Continuer</button>
+        </div>
+        ${renderInternalTransferHistoryMarkup()}
+    `;
+    $("#txInternalBack")?.addEventListener("click",()=>{renderTransactionHome();applyLanguage();});
+    const lookup=$("#txInternalLookup");
+    const recipientInput=$("#txInternalRecipientId");
+    const amountInput=$("#txInternalAmount");
+    const currencyInput=$("#txInternalCurrency");
+    const continueButton=$("#txInternalContinue");
+    const recipientState=$("#txInternalRecipientState");
+    const balanceNote=$("#txInternalBalance");
+    let verifiedRecipient=null;
+
+    function validateInternalAmount(){
+        const code=currencyInput?.value||"CDF";
+        const raw=String(amountInput?.value||"").trim().replace(",",".");
+        const amount=Number(raw);
+        const available=Number(window.THINK_SERVER_STATE?.wallet?.balances?.[code]||0);
+        const valid=!!verifiedRecipient && raw!=="" && Number.isFinite(amount) && amount>=1 && amount<=available;
+        if(continueButton) continueButton.disabled=!valid;
+        if(balanceNote) balanceNote.textContent=`Solde disponible : ${thinkMoney(available,code)} · Frais Think : 0`;
+        return valid;
+    }
+    lookup?.addEventListener("click",async()=>{
+        const identifier=(recipientInput?.value||"").trim().toUpperCase();
+        if(!/^THK-[A-F0-9]{12}$/.test(identifier)){
+            verifiedRecipient=null;
+            if(recipientState) recipientState.textContent="Identifiant invalide. Le format attendu est THK- suivi de 12 caractères.";
+            validateInternalAmount();
+            return;
+        }
+        lookup.disabled=true; lookup.textContent="Vérification…";
+        try{
+            const result=await window.thinkApiRequest("/api/internal-transfers/recipient/"+encodeURIComponent(identifier));
+            verifiedRecipient=result.recipient;
+            if(recipientState) recipientState.innerHTML=`Bénéficiaire vérifié : <strong>${txEscapeHtml(verifiedRecipient.full_name)}</strong><br><small>${txEscapeHtml(verifiedRecipient.think_id)}</small>`;
+        }catch(error){
+            verifiedRecipient=null;
+            if(recipientState) recipientState.textContent=error.message||"Bénéficiaire introuvable.";
+        }finally{
+            lookup.disabled=false; lookup.textContent="Vérifier le bénéficiaire";
+            validateInternalAmount();
+        }
+    });
+    recipientInput?.addEventListener("input",()=>{verifiedRecipient=null;if(recipientState)recipientState.textContent="Vérifie à nouveau le bénéficiaire après toute modification du Think ID.";validateInternalAmount();});
+    amountInput?.addEventListener("input",validateInternalAmount);
+    currencyInput?.addEventListener("change",()=>{localStorage.setItem("think-transfer-currency",currencyInput.value);validateInternalAmount();});
+    continueButton?.addEventListener("click",()=>{
+        if(!validateInternalAmount()||!verifiedRecipient) return;
+        const amount=Number(String(amountInput.value).trim().replace(",","."));
+        const code=currencyInput.value;
+        const reason=$("#txInternalReason")?.value.trim()||"";
+        const available=Number(window.THINK_SERVER_STATE?.wallet?.balances?.[code]||0);
+        const target=verifiedRecipient;
+        main.innerHTML=`
+            <button class="tx-back" type="button" id="txInternalEdit"><span>‹</span><span>Modifier</span></button>
+            <div class="tx-selected-head"><div class="tx-selected-name">Confirmer le transfert Think</div><div class="tx-selected-type">Vérifie le bénéficiaire et le montant.</div></div>
+            <div class="tx-confirm"><div class="tx-summary">
+                <div class="tx-summary-row"><span>Destinataire</span><strong>${txEscapeHtml(target.full_name)}</strong></div>
+                <div class="tx-summary-row"><span>Think ID</span><span>${txEscapeHtml(target.think_id)}</span></div>
+                <div class="tx-summary-row"><span>Montant</span><strong>${thinkMoney(amount,code)}</strong></div>
+                <div class="tx-summary-row"><span>Frais</span><span>0,00 ${code}</span></div>
+                <div class="tx-summary-row tx-total"><span>Nouveau solde estimé</span><strong>${thinkMoney(available-amount,code)}</strong></div>
+            </div>
+            <button class="tx-primary" type="button" id="txInternalConfirm">Confirmer le transfert</button>
+            <div class="tx-info">Ce transfert déplace uniquement des crédits fictifs Sandbox entre deux portefeuilles Think. Aucun argent réel n'est envoyé.</div></div>`;
+        $("#txInternalEdit")?.addEventListener("click",renderInternalTransferForm);
+        $("#txInternalConfirm")?.addEventListener("click",async event=>{
+            const button=event.currentTarget;
+            if(button.disabled) return;
+            button.disabled=true; button.textContent="Enregistrement…";
+            try{
+                const result=await window.thinkApiRequest("/api/internal-transfers",{
+                    method:"POST",
+                    headers:{"Idempotency-Key":"thi-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2))},
+                    body:JSON.stringify({recipient_think_id:target.think_id,amount:String(amount),currency:code,reason})
+                });
+                await window.thinkApiHydrate();
+                const transfer=result.transfer;
+                main.innerHTML=`
+                    <div class="tx-empty" style="min-height:36dvh;"><div>
+                        <div style="font-size:48px;line-height:1;margin-bottom:16px;">✓</div>
+                        <div class="tx-selected-name">Transfert Think réussi · Sandbox</div>
+                        <div class="tx-selected-type" style="margin-top:7px;">${thinkMoney(transfer.amount,transfer.currency)} envoyés à ${txEscapeHtml(transfer.recipient_name)}.</div>
+                        <div class="tx-info" style="margin-top:12px;">Référence : ${txEscapeHtml(transfer.public_id)}<br>Statut : ${txEscapeHtml(transfer.status)}<br>Le portefeuille du bénéficiaire a été crédité. Aucun argent réel n'a été déplacé.</div>
+                        <button class="tx-primary" type="button" id="txInternalNew" style="margin-top:18px;">Nouveau transfert</button>
+                    </div></div>
+                    ${renderInternalTransferHistoryMarkup()}`;
+                $("#txInternalNew")?.addEventListener("click",renderInternalTransferForm);
+            }catch(error){
+                showToast(error.message||"Impossible d'enregistrer le transfert Think.");
+                button.disabled=false; button.textContent="Réessayer";
+            }
+            applyLanguage();
+        });
+    });
+    applyLanguage();
+}
 
 function renderTransactionForm(mode){
     const main=$("#txMain");
