@@ -1537,9 +1537,29 @@ def _cached_cinetpay_client(api_key: str, api_password: str):
 def _payment_return_url(public_id: str, result: str) -> str:
     base = os.getenv("THINK_PUBLIC_BASE_URL", "https://think-crypt-entreprise.onrender.com").strip().rstrip("/")
     parsed = urlparse(base)
-    if parsed.scheme != "https" or not parsed.netloc:
-        raise HTTPException(status_code=503, detail="THINK_PUBLIC_BASE_URL doit être une URL HTTPS publique.")
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(status_code=503, detail="THINK_PUBLIC_BASE_URL doit être une URL HTTPS publique valide.")
     return f"{base}/api/cinetpay/payin/return?payment={public_id}&result={result}"
+
+
+def _payment_notify_url() -> str:
+    notify_url = os.getenv(
+        "CINETPAY_NOTIFY_URL",
+        "https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/notify",
+    ).strip()
+    parsed = urlparse(notify_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or len(notify_url) > 120
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="CINETPAY_NOTIFY_URL doit être une URL HTTPS publique valide de 120 caractères maximum.",
+        )
+    return notify_url
 
 
 def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
@@ -1745,8 +1765,35 @@ def create_payment(
         provider_response={"environment": provider_config["mode"]},
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
+    try:
+        db.commit()
+        db.refresh(row)
+    except IntegrityError:
+        # Two identical requests can arrive at nearly the same time. The
+        # unique idempotency constraint is the final guard against two PayIns.
+        db.rollback()
+        existing = db.query(PaymentTransaction).filter(
+            PaymentTransaction.idempotency_key == idempotency_key
+        ).first()
+        if existing is None or existing.user_id != user.id:
+            raise HTTPException(status_code=409, detail="Cette demande de paiement existe déjà. Vérifie son statut avant de réessayer.") from None
+        if (
+            Decimal(existing.amount) != amount_decimal
+            or existing.currency != currency
+            or existing.purpose != data.purpose
+        ):
+            raise HTTPException(status_code=409, detail="Cette clé d'idempotence a déjà été utilisée pour une autre demande.")
+        if existing.payment_url:
+            return {
+                **serialize_payment(existing),
+                "payment_url": existing.payment_url,
+                "test_mode": (existing.provider_response or {}).get("environment") == "sandbox",
+                "idempotent_replay": True,
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="Une demande avec cette clé est déjà en cours. Vérifie son statut avant de réessayer.",
+        ) from None
 
     profile = user.profile
     first_name = (profile.first_name if profile else "") or ""
@@ -1765,10 +1812,7 @@ def create_payment(
         last_name = last_name.strip() or " ".join(parts[1:])
 
     description = re.sub(r"[^A-Za-z0-9À-ÿ .'-]", " ", data.description).strip() or "Depot Think"
-    notify_url = os.getenv(
-        "CINETPAY_NOTIFY_URL",
-        "https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/notify",
-    ).strip()
+    notify_url = _payment_notify_url()
 
     try:
         from cinetpay import PaymentRequest
@@ -1791,6 +1835,17 @@ def create_payment(
             payment_method=payment_method,
         )
         provider_response = client.payment.initialize(request_data, "CD")
+        if provider_response.merchant_transaction_id != merchant_transaction_id:
+            row.status = "initialization_unknown"
+            row.provider_response = {
+                "environment": provider_config["mode"],
+                "error_type": "merchant_reference_mismatch",
+            }
+            db.commit()
+            raise HTTPException(
+                status_code=502,
+                detail=f"CinetPay n'a pas confirmé la référence de cette demande. Référence Think : {public_id}. Vérifie cette demande avant de réessayer.",
+            )
         try:
             _validate_cinetpay_payment_url(provider_response.payment_url, provider_config["mode"])
         except HTTPException:
