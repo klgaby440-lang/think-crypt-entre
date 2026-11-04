@@ -1750,6 +1750,9 @@ def create_payment(
             detail="La première initialisation doit être vérifiée avant de créer une nouvelle demande. Utilise une nouvelle clé uniquement après rapprochement.",
         )
 
+    # Validate callback configuration before persisting an initialization row.
+    notify_url = _payment_notify_url()
+
     public_id = "PAY-" + uuid4().hex[:16].upper()
     merchant_transaction_id = "THK" + uuid4().hex[:24].upper()
     row = PaymentTransaction(
@@ -1812,7 +1815,6 @@ def create_payment(
         last_name = last_name.strip() or " ".join(parts[1:])
 
     description = re.sub(r"[^A-Za-z0-9À-ÿ .'-]", " ", data.description).strip() or "Depot Think"
-    notify_url = _payment_notify_url()
 
     try:
         from cinetpay import PaymentRequest
