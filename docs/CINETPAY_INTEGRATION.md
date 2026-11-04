@@ -73,3 +73,42 @@ Après validation, implémenter l'adaptateur PayOut identifié (ne pas basculer 
 - Enregistrer un retrait simulé et vérifier la réservation du solde. Aucun Mobile Money ne doit être crédité.
 
 Ne pas considérer une redirection de retour navigateur comme preuve de paiement : le serveur doit interroger CinetPay et confirmer l'état avant de créditer un portefeuille.
+
+
+## Étape 1 — PayIn : durcissement du parcours
+
+Le parcours PayIn utilise le même backend et les mêmes routes en Sandbox et en production. Seuls l'environnement, les clés et les autorisations changent. La production reste verrouillée dans le code et dans la configuration tant que la conformité n'est pas validée.
+
+### Parcours nominal
+
+1. L'utilisateur authentifié demande un dépôt CDF.
+2. Think valide la devise, le montant, le réseau choisi et la clé d'idempotence.
+3. Think valide l'URL de notification HTTPS avant de créer une transaction.
+4. Think crée une référence marchande unique et initialise le paiement via le SDK CinetPay.
+5. Think vérifie que CinetPay a retourné la même référence marchande, une URL checkout sur le domaine attendu pour l'environnement, un identifiant de transaction et un jeton de notification.
+6. Le navigateur est redirigé vers le checkout CinetPay.
+7. La notification reçue est authentifiée avec le jeton conservé côté serveur. Think interroge ensuite CinetPay directement : le contenu de la notification ou le retour navigateur ne peut pas créditer le portefeuille à lui seul.
+8. Après confirmation du statut `SUCCESS` et vérification des références, Think crédite le portefeuille et inscrit une entrée de ledger avec une référence unique. Les notifications répétées ne doivent pas créditer deux fois.
+
+### Durcissements ajoutés dans cette étape
+
+- Validation stricte de `CINETPAY_NOTIFY_URL` : HTTPS obligatoire, hôte présent, absence d'identifiants intégrés et longueur maximale compatible avec le SDK.
+- La configuration de notification est validée avant de persister une transaction, afin d'éviter les transactions bloquées à l'état `initializing` à cause d'une URL incorrecte.
+- Contrôle de la référence marchande renvoyée par CinetPay lors de l'initialisation. Une incohérence place la transaction en `initialization_unknown` et interdit une nouvelle initialisation aveugle.
+- Gestion explicite d'une collision concurrente sur une même clé d'idempotence : Think récupère la demande existante ou répond avec un conflit sûr, sans créer volontairement un deuxième paiement.
+- Les secrets de notification restent exclus des réponses API utilisateur.
+
+### Matrice de validation avant production
+
+- [ ] PayIn Sandbox nominal : checkout ouvert, paiement test terminé, statut confirmé par interrogation serveur.
+- [ ] Paiement refusé : aucun crédit du portefeuille.
+- [ ] Notification invalide ou jeton incorrect : rejet HTTP, aucun crédit.
+- [ ] Référence marchande ou identifiant CinetPay incohérent : rejet, aucun crédit.
+- [ ] Notification dupliquée : une seule écriture de ledger et un seul crédit.
+- [ ] Deux requêtes simultanées avec la même clé d'idempotence : une seule transaction marchande.
+- [ ] Retour navigateur « success » sans confirmation CinetPay : aucun crédit.
+- [ ] Indisponibilité temporaire de CinetPay : statut conservé et vérification réessayable sans recréer aveuglément le paiement.
+- [ ] Vérifier les URL de notification et de retour en HTTPS sur le domaine Render.
+- [ ] Rejouer tous les tests avec les clés et paramètres de production dans un environnement contrôlé avant ouverture aux utilisateurs.
+
+Les tests de la matrice doivent être exécutés avec de vraies clés Sandbox dans Render. Aucun résultat de test fournisseur n'est supposé ou déclaré réussi par la seule modification du code.
