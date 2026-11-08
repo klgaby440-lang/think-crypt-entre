@@ -1137,6 +1137,24 @@ def create_withdrawal(
             raise HTTPException(status_code=409, detail="Cette demande est en cours de rapprochement. Consulte l'historique avant de réessayer.")
         return {"ok": True, "withdrawal": _serialize_withdrawal(existing_row), "idempotent_replay": True}
 
+    pending_withdrawal = (
+        db.query(Withdrawal)
+        .filter(
+            Withdrawal.user_id == user.id,
+            Withdrawal.status.in_(["payout_initializing", "payout_pending", "payout_unknown"]),
+        )
+        .order_by(Withdrawal.created_at.desc())
+        .first()
+    )
+    if pending_withdrawal is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Un retrait ({pending_withdrawal.public_id}) est encore en cours de vérification. "
+                "Vérifie son statut avant de lancer un nouveau PayOut."
+            ),
+        )
+
     wallet_row = (
         db.query(Wallet)
         .filter(Wallet.user_id == user.id, Wallet.currency == currency)
