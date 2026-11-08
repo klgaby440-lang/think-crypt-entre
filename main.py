@@ -1797,6 +1797,28 @@ def _require_cinetpay():
     return _cached_cinetpay_client(api_key, api_password), status
 
 
+
+def _cinetpay_error_log_fields(exc: Exception) -> tuple[str, str, str]:
+    """Return safe provider error fields without logging credentials or full payloads."""
+    error_type = type(exc).__name__
+    api_code = getattr(exc, "api_code", "")
+    api_status = str(getattr(exc, "api_status", "") or "")[:80]
+    description = str(getattr(exc, "description", "") or "")
+    description = re.sub(r"\\s+", " ", description).strip()
+    description = re.sub(
+        r"(?i)\\bsk_(?:test|live)_[A-Za-z0-9_-]+\\b",
+        "[REDACTED]",
+        description,
+    )
+    description = re.sub(
+        r"(?i)\\bBearer\\s+[^\\s,;]+",
+        "Bearer [REDACTED]",
+        description,
+    )
+    description = description[:240]
+    return error_type, str(api_code)[:32], api_status, description
+
+
 @lru_cache(maxsize=2)
 def _cached_cinetpay_client(api_key: str, api_password: str):
     """Keep one SDK client/token cache per credential set for this process."""
@@ -2188,10 +2210,14 @@ def _fetch_and_sync_cinetpay_payment(db: Session, payment: PaymentTransaction) -
     try:
         provider_status = client.payment.get_status(identifier, "CD")
     except Exception as exc:
+        error_type, api_code, api_status, description = _cinetpay_error_log_fields(exc)
         logger.warning(
-            "CinetPay status check failed for %s (%s).",
+            "CinetPay status check failed for %s: exception_type=%s api_code=%s api_status=%s description=%s",
             payment.public_id,
-            type(exc).__name__,
+            error_type,
+            api_code or "-",
+            api_status or "-",
+            description or "-",
         )
         raise HTTPException(status_code=502, detail="Impossible de vérifier le statut CinetPay pour le moment.") from None
     return _sync_cinetpay_payment_status(db, payment, provider_status)
@@ -2364,10 +2390,14 @@ def create_payment(
             "error_type": type(exc).__name__,
         }
         db.commit()
+        error_type, api_code, api_status, description = _cinetpay_error_log_fields(exc)
         logger.warning(
-            "CinetPay payment initialization unresolved for %s (%s).",
+            "CinetPay payment initialization unresolved for %s: exception_type=%s api_code=%s api_status=%s description=%s",
             public_id,
-            type(exc).__name__,
+            error_type,
+            api_code or "-",
+            api_status or "-",
+            description or "-",
         )
         raise HTTPException(
             status_code=502,
