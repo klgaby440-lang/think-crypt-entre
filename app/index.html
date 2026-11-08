@@ -5976,7 +5976,7 @@ function initWalletInterface(){
         const values=Object.fromEntries(new FormData(payoutForm).entries());
         const amount=Number(values.amount);
         if(!values.mobile_money_account_id){showToast("Choisis un numéro Mobile Money enregistré.");return;}
-        if(!Number.isInteger(amount)||amount<100||amount>1500000||amount%5!==0){showToast("Le montant doit être un multiple de 5 entre 100 et 1 500 000 CDF.");return;}
+        if(!Number.isInteger(amount)||amount<100||amount>1500000){showToast("Le montant doit être un nombre entier entre 100 et 1 500 000 CDF.");return;}
         const key="wdr-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
         button.disabled=true; button.textContent="Connexion à CinetPay…";
         try{
