@@ -1827,7 +1827,9 @@ def _cached_cinetpay_client(api_key: str, api_password: str):
     return CinetPayClient(ClientConfig(
         credentials={"CD": CountryCredentials(api_key=api_key, api_password=api_password)},
         timeout=25.0,
-        debug=False,
+        # Temporary diagnostic logging: the official SDK sanitizes API keys,
+        # passwords, and tokens from request logs.
+        debug=True,
     ))
 
 
