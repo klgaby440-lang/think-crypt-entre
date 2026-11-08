@@ -1229,6 +1229,7 @@ def create_withdrawal(
             "notify_token": provider_response.notify_token,
             "provider_initial_status": str(provider_response.status),
             "provider_initial_code": provider_response.code,
+            "provider_fee_amount": str(provider_response.fee_amount or ""),
         })
         row.provider_transaction_id = provider_response.transaction_id
         row.provider_response = response_data
@@ -1886,14 +1887,22 @@ def _serialize_withdrawal(row: Withdrawal) -> dict[str, Any]:
         "payout_failed": "Transfert échoué",
         "sandbox_pending": "Ancienne demande simulée",
     }
+    phone_display = row.phone or ""
+    if phone_display and "•" not in phone_display:
+        try:
+            phone_display = _mask_mobile_phone(_normalize_drc_phone(phone_display))
+        except HTTPException:
+            phone_display = "Numéro masqué"
+    response_data = row.provider_response or {}
     return {
         "public_id": row.public_id,
         "status": row.status,
         "status_label": state_labels.get(row.status, row.status),
         "operator": row.operator,
-        "phone": row.phone,
+        "phone": phone_display,
         "amount": float(row.amount),
         "fee": float(row.fee),
+        "provider_fee_amount": str(response_data.get("provider_fee_amount") or ""),
         "net_amount": float(row.net_amount),
         "currency": row.currency,
         "provider_transaction_id": row.provider_transaction_id,
