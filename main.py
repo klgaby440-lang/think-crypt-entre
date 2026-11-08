@@ -2462,7 +2462,3 @@ def cinetpay_payin_return(payment: str, result: str = "returned"):
         url=f"/?cinetpay_payment={payment}&cinetpay_result={safe_result}",
         status_code=303,
     )
-
-
-
-cryptography>=42.0.0
