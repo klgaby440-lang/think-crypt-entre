@@ -147,6 +147,9 @@ jobs:
           python - <<'PY'
           import os
           from decimal import Decimal
+          from types import SimpleNamespace
+          from unittest.mock import Mock, patch
+          from cryptography.fernet import Fernet
           from fastapi.testclient import TestClient
           from sqlalchemy import create_engine
           from sqlalchemy.orm import sessionmaker
@@ -159,6 +162,8 @@ jobs:
           os.environ["CINETPAY_API_KEY_CD"] = "sk_test_ci_only"
           os.environ["CINETPAY_API_PASSWORD_CD"] = "ci-test-password"
           os.environ["CINETPAY_CURRENCY"] = "CDF"
+          os.environ["CINETPAY_PAYOUT_SANDBOX_ENABLED"] = "true"
+          os.environ["MOBILE_MONEY_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
           import main
 
@@ -216,15 +221,102 @@ jobs:
           assert transfer.json()["transfer"]["status"] == "sandbox_pending"
           assert transfer.json()["no_real_money_sent"] is True
 
-          withdrawal = client.post("/api/withdrawals", headers=headers, json={
-              "amount": "2000.00",
-              "currency": "CDF",
-              "operator": "orange",
-              "phone": "+243000000003",
+          # Save more than one Mobile Money number; the API returns masked values only.
+          airtel_account = client.post("/api/mobile-money/accounts", headers=headers, json={
+              "operator": "AIRTEL_CD",
+              "phone": "+243999000111",
+              "label": "Airtel test",
+              "is_default": True,
           })
-          assert withdrawal.status_code == 200, withdrawal.text
-          assert withdrawal.json()["withdrawal"]["status"] == "sandbox_pending"
-          assert withdrawal.json()["no_real_payout"] is True
+          assert airtel_account.status_code == 200, airtel_account.text
+          orange_account = client.post("/api/mobile-money/accounts", headers=headers, json={
+              "operator": "OM_CD",
+              "phone": "+243999000222",
+              "label": "Orange test",
+              "is_default": False,
+          })
+          assert orange_account.status_code == 200, orange_account.text
+          saved_accounts = client.get("/api/mobile-money/accounts", headers=headers)
+          assert saved_accounts.status_code == 200, saved_accounts.text
+          assert len(saved_accounts.json()["items"]) == 2
+          assert "+243999000111" not in saved_accounts.text
+          assert "+243999000222" not in saved_accounts.text
+          orange_account_id = orange_account.json()["account"]["id"]
+
+          # Mock the CinetPay V1 transfer client. Test SUCCESS, PENDING then FAILED
+          # without network access or real Mobile Money transfers.
+          payout_statuses = {}
+          payout_requests = []
+
+          def fake_payout_create(request_data, country):
+              payout_requests.append(request_data)
+              provider_id = f"ci-payout-{len(payout_requests)}"
+              initial_status = "SUCCESS" if len(payout_requests) == 1 else "PENDING"
+              payout_statuses[provider_id] = SimpleNamespace(
+                  status=initial_status,
+                  merchant_transaction_id=request_data.merchant_transaction_id,
+                  transaction_id=provider_id,
+                  amount=str(request_data.amount),
+                  currency=request_data.currency,
+                  fee_amount="0",
+                  code=100 if initial_status == "SUCCESS" else 2002,
+              )
+              return SimpleNamespace(
+                  merchant_transaction_id=request_data.merchant_transaction_id,
+                  transaction_id=provider_id,
+                  notify_token=f"ci-payout-notify-{len(payout_requests)}",
+                  status="PENDING",
+                  code=2002,
+                  fee_amount="0",
+              )
+
+          fake_transfer_api = SimpleNamespace(
+              create=Mock(side_effect=fake_payout_create),
+              get_status=Mock(side_effect=lambda provider_id, country: payout_statuses[provider_id]),
+          )
+          fake_payout_client = SimpleNamespace(transfer=fake_transfer_api)
+          with patch.object(main, "_require_cinetpay_payout_sandbox", return_value=fake_payout_client):
+              payout_headers = {**headers, "Idempotency-Key": "alice-cinetpay-payout-success-001"}
+              payout_payload = {
+                  "amount": "2000",
+                  "currency": "CDF",
+                  "mobile_money_account_id": airtel_account.json()["account"]["id"],
+              }
+              payout_success = client.post("/api/withdrawals", headers=payout_headers, json=payout_payload)
+              assert payout_success.status_code == 200, payout_success.text
+              assert payout_success.json()["withdrawal"]["status"] == "payout_success"
+              assert payout_success.json()["no_real_money"] is True
+              assert fake_transfer_api.create.call_count == 1
+              assert payout_requests[0].phone_number == "+243999000111"
+
+              # Same idempotency key returns the same transfer without calling CinetPay twice.
+              payout_replay = client.post("/api/withdrawals", headers=payout_headers, json=payout_payload)
+              assert payout_replay.status_code == 200, payout_replay.text
+              assert payout_replay.json()["idempotent_replay"] is True
+              assert payout_replay.json()["withdrawal"]["public_id"] == payout_success.json()["withdrawal"]["public_id"]
+              assert fake_transfer_api.create.call_count == 1
+
+              # PENDING keeps the amount reserved. A later provider FAILED result releases it.
+              pending_headers = {**headers, "Idempotency-Key": "alice-cinetpay-payout-pending-002"}
+              pending_payload = {
+                  "amount": "500",
+                  "currency": "CDF",
+                  "mobile_money_account_id": orange_account_id,
+              }
+              payout_pending = client.post("/api/withdrawals", headers=pending_headers, json=pending_payload)
+              assert payout_pending.status_code == 200, payout_pending.text
+              assert payout_pending.json()["withdrawal"]["status"] == "payout_pending"
+              assert fake_transfer_api.create.call_count == 2
+              pending_provider_id = "ci-payout-2"
+              payout_statuses[pending_provider_id].status = "FAILED"
+              payout_statuses[pending_provider_id].code = 2010
+              refreshed_payout = client.post(
+                  f"/api/withdrawals/{payout_pending.json()['withdrawal']['public_id']}/refresh",
+                  headers=headers,
+              )
+              assert refreshed_payout.status_code == 200, refreshed_payout.text
+              assert refreshed_payout.json()["withdrawal"]["status"] == "payout_failed"
+              assert refreshed_payout.json()["final"] is True
 
           # Create a second independent account to test a real internal ledger move.
           bob_created = client.post("/api/auth/register", json={
@@ -288,7 +380,7 @@ jobs:
           wallet = client.get("/api/wallet", headers=headers)
           assert wallet.status_code == 200, wallet.text
           assert Decimal(str(wallet.json()["balances"]["CDF"])) == Decimal("6000.0"), f"Unexpected Alice balance after Alice-to-Bob transfer: {wallet.json()}"
-          assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("3500.0")
+          assert Decimal(str(wallet.json()["reserved_balances"]["CDF"])) == Decimal("1500.0")
 
           bob_wallet = client.get("/api/wallet", headers=bob_headers)
           assert bob_wallet.status_code == 200, bob_wallet.text
@@ -308,9 +400,6 @@ jobs:
 
           # Mock the official CinetPay v1 SDK: test the complete PayIn lifecycle
           # without making external requests or moving real money.
-          from types import SimpleNamespace
-          from unittest.mock import Mock, patch
-
           cinetpay_status = client.get("/api/cinetpay/status", headers=headers)
           assert cinetpay_status.status_code == 200, cinetpay_status.text
           assert cinetpay_status.json()["payin_enabled"] is True
@@ -347,6 +436,7 @@ jobs:
               "currency": "CDF",
               "description": "Test dépôt CinetPay",
               "payment_method": "OM_CD",
+              "mobile_money_account_id": orange_account_id,
           }
           payin_headers = {**headers, "Idempotency-Key": "alice-cinetpay-payin-001"}
           with patch.object(main, "_require_cinetpay", return_value=(fake_cinetpay, payin_config)):
@@ -359,6 +449,7 @@ jobs:
               assert payin_json["payment_url"] == fake_payment_response.payment_url
               assert "notify_token" not in payin.text
               assert fake_payment_api.initialize.call_count == 1
+              assert fake_payment_api.initialize.call_args.args[0].client_phone_number == "+243999000222"
 
               # Same key and payload returns the same checkout without creating another one.
               payin_replay = client.post("/api/payments/create", headers=payin_headers, json=payin_payload)
@@ -415,7 +506,7 @@ jobs:
           wallet_after_payin = client.get("/api/wallet", headers=headers)
           assert wallet_after_payin.status_code == 200, wallet_after_payin.text
           assert Decimal(str(wallet_after_payin.json()["balances"]["CDF"])) == Decimal("7000.0"), wallet_after_payin.json()
-          assert Decimal(str(wallet_after_payin.json()["reserved_balances"]["CDF"])) == Decimal("3500.0"), wallet_after_payin.json()
+          assert Decimal(str(wallet_after_payin.json()["reserved_balances"]["CDF"])) == Decimal("1500.0"), wallet_after_payin.json()
 
           # Verify missing/disabled PayIn configuration fails closed.
           os.environ["CINETPAY_ENABLED"] = "false"
@@ -428,9 +519,9 @@ jobs:
           transfers = client.get("/api/transfers", headers=headers)
           withdrawals = client.get("/api/withdrawals", headers=headers)
           assert transfers.status_code == 200 and len(transfers.json()["items"]) == 1
-          assert withdrawals.status_code == 200 and len(withdrawals.json()["items"]) == 1
+          assert withdrawals.status_code == 200 and len(withdrawals.json()["items"]) == 2
 
-          print("Think Sandbox API smoke test OK: signup, auth, credit, external transfer, withdrawal, Alice-to-Bob internal transfer, mocked CinetPay PayIn, verified webhook, duplicate webhook protection, idempotency, balances, history, notifications.")
+          print("Think Sandbox API smoke test OK: signup, auth, credit, external transfer, multiple encrypted Mobile Money numbers, mocked PayOut SUCCESS/PENDING/FAILED, PayOut idempotency and balance release, Alice-to-Bob internal transfer, mocked CinetPay PayIn with saved number, verified webhook, duplicate webhook protection, balances, history, notifications.")
           client.close()
           engine.dispose()
           PY
