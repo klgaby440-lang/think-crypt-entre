@@ -39,7 +39,6 @@ import logging
 import os
 import re
 import hashlib
-import hmac
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -195,9 +194,6 @@ class MobileMoneyAccount(Base):
     """A user's saved mobile-money destination. Phone data is encrypted at rest."""
 
     __tablename__ = "mobile_money_accounts"
-    __table_args__ = (
-        UniqueConstraint("user_id", "id", name="uq_mobile_money_account_owner_id"),
-    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
