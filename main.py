@@ -1072,10 +1072,10 @@ def create_withdrawal(
     if amount_decimal != data.amount or amount_decimal != amount_decimal.to_integral_value():
         raise HTTPException(status_code=422, detail="Le montant PayOut CDF doit être un entier.")
     amount = int(amount_decimal)
-    if amount < PAYOUT_MIN_CDF or amount > PAYOUT_MAX_CDF or amount % 5 != 0:
+    if amount < PAYOUT_MIN_CDF or amount > PAYOUT_MAX_CDF:
         raise HTTPException(
             status_code=422,
-            detail=f"Le montant doit être un multiple de 5 compris entre {PAYOUT_MIN_CDF:,} et {PAYOUT_MAX_CDF:,} CDF (plage de validation du SDK installé).",
+            detail=f"Le montant doit être un nombre entier compris entre {PAYOUT_MIN_CDF:,} et {PAYOUT_MAX_CDF:,} CDF (plage de validation du SDK installé).",
         )
 
     mobile_account = None
@@ -1098,6 +1098,30 @@ def create_withdrawal(
     if operator not in PAYOUT_OPERATORS_CD:
         raise HTTPException(status_code=422, detail="Opérateur PayOut non autorisé pour la RDC.")
     masked_phone = _mask_mobile_phone(phone)
+
+    # Validate the complete SDK request before reserving wallet funds. A local
+    # configuration/validation error must never leave a reservation behind.
+    public_id = "WDR-" + uuid4().hex[:16].upper()
+    try:
+        from cinetpay import TransferRequest
+        from cinetpay.validation import validate_transfer_request
+
+        notify_url = _cinetpay_payout_notify_url()
+        request_data = TransferRequest(
+            currency="CDF",
+            merchant_transaction_id=public_id,
+            phone_number=phone,
+            amount=amount,
+            payment_method=operator,
+            reason="Retrait Think Sandbox",
+            notify_url=notify_url,
+        )
+        validate_transfer_request(request_data)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.info("PayOut request rejected locally (%s).", type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Paramètres du transfert incompatibles avec le SDK CinetPay installé.") from None
 
     key = (idempotency_key or ("wdr-" + uuid4().hex)).strip()
     if not key or len(key) > 128:
@@ -1131,7 +1155,6 @@ def create_withdrawal(
             detail=f"Solde insuffisant. Disponible : {wallet_row.available_balance} {currency}.",
         )
 
-    public_id = "WDR-" + uuid4().hex[:16].upper()
     wallet_row.available_balance = Decimal(wallet_row.available_balance) - amount_decimal
     wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) + amount_decimal
     row = Withdrawal(
@@ -1195,18 +1218,6 @@ def create_withdrawal(
         raise HTTPException(status_code=409, detail="Demande PayOut déjà reçue. Vérifie son statut avant toute nouvelle tentative.") from None
 
     try:
-        from cinetpay import TransferRequest
-
-        notify_url = _cinetpay_payout_notify_url()
-        request_data = TransferRequest(
-            currency="CDF",
-            merchant_transaction_id=row.public_id,
-            phone_number=phone,
-            amount=amount,
-            payment_method=operator,
-            reason="Retrait Think Sandbox",
-            notify_url=notify_url,
-        )
         provider_response = client.transfer.create(request_data, "CD")
         if provider_response.merchant_transaction_id != row.public_id:
             raise RuntimeError("merchant_transaction_id_mismatch")
