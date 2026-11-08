@@ -5852,7 +5852,7 @@ function initWalletInterface(){
       detail.innerHTML=`<div class="wallet-detail-head"><div><div class="wallet-detail-title">${t[0]}</div><div class="wallet-detail-sub">${t[1]}</div></div></div>${t[2]}`;
       const savedMobileAccounts=window.THINK_SERVER_STATE?.mobileMoneyAccounts?.items||[];
       const mobileOperatorName={AIRTEL_CD:"Airtel Money",OM_CD:"Orange Money",MPESA_CD:"M-Pesa"};
-      const accountOptionHtml=savedMobileAccounts.map(a=>'<option value="'+a.id+'" '+(a.is_default?'selected':'')+'>'+txEscapeHtml(mobileOperatorName[a.operator]||a.operator)+' · '+txEscapeHtml(a.label)+' · '+txEscapeHtml(a.phone_masked)+'</option>').join("");
+      const accountOptionHtml=savedMobileAccounts.map(a=>'<option value="'+a.id+'" data-operator="'+txEscapeHtml(a.operator)+'" '+(a.is_default?'selected':'')+'>'+txEscapeHtml(mobileOperatorName[a.operator]||a.operator)+' · '+txEscapeHtml(a.label)+' · '+txEscapeHtml(a.phone_masked)+'</option>').join("");
       const withdrawSelect=$("#walletWithdrawAccounts");
       if(withdrawSelect) withdrawSelect.innerHTML='<option value="">Choisir un numéro enregistré</option>'+accountOptionHtml;
       const payinSelect=$("#walletPayinMobileAccount");
@@ -5988,10 +5988,10 @@ function initWalletInterface(){
         }catch(error){
           showToast(error.message||"Le résultat doit être vérifié dans l'historique.");
           button.disabled=false; button.textContent="Réessayer";
-          try{await window.thinkApiHydrate();}catch(_){}
+          try{await window.thinkApiHydrate(); walletDetailAction("withdraw");}catch(_){}
         }
       });
-      $$("[data-refresh-withdrawal]").forEach(button=>button.addEventListener("click",async()=>{
+      $("[data-refresh-withdrawal]").forEach(button=>button.addEventListener("click",async()=>{
         button.disabled=true; button.textContent="Vérification…";
         try{
           await window.thinkApiRequest("/api/withdrawals/"+encodeURIComponent(button.dataset.refreshWithdrawal)+"/refresh",{method:"POST"});
