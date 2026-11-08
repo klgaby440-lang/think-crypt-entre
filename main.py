@@ -38,6 +38,10 @@ import jwt
 import logging
 import os
 import re
+import hashlib
+import hmac
+
+from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger("think.database")
 
@@ -185,6 +189,42 @@ class Withdrawal(Base):
 
     user = relationship("ThinkUser", back_populates="withdrawals")
     wallet = relationship("Wallet")
+
+
+class MobileMoneyAccount(Base):
+    """A user's saved mobile-money destination. Phone data is encrypted at rest."""
+
+    __tablename__ = "mobile_money_accounts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "id", name="uq_mobile_money_account_owner_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    operator = Column(String(24), nullable=False)
+    label = Column(String(60), nullable=False, default="Mon numéro")
+    phone_ciphertext = Column(String(512), nullable=False)
+    phone_masked = Column(String(40), nullable=False)
+    is_default = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class WithdrawalIdempotency(Base):
+    """Durable request-key registry so retries never create a second payout."""
+
+    __tablename__ = "withdrawal_idempotency"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_withdrawal_user_idempotency"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    idempotency_key = Column(String(128), nullable=False)
+    request_fingerprint = Column(String(64), nullable=False)
+    withdrawal_id = Column(Integer, ForeignKey("withdrawals.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class Transfer(Base):
@@ -481,6 +521,7 @@ class PaymentData(BaseModel):
     currency: str = Field(default="CDF", min_length=3, max_length=3)
     description: str = Field(default="Dépôt Think", max_length=200)
     payment_method: str | None = Field(default=None, max_length=24)
+    mobile_money_account_id: int | None = Field(default=None, gt=0)
 
 
 class SandboxCreditData(BaseModel):
@@ -492,8 +533,16 @@ class SandboxCreditData(BaseModel):
 class WithdrawalData(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(min_length=3, max_length=3)
-    operator: str = Field(min_length=2, max_length=32)
+    mobile_money_account_id: int | None = Field(default=None, gt=0)
+    operator: str | None = Field(default=None, min_length=2, max_length=32)
+    phone: str | None = Field(default=None, min_length=6, max_length=40)
+
+
+class MobileMoneyAccountData(BaseModel):
+    operator: str = Field(min_length=2, max_length=24)
     phone: str = Field(min_length=6, max_length=40)
+    label: str = Field(default="Mon numéro", min_length=1, max_length=60)
+    is_default: bool = False
 
 
 ALLOWED_CURRENCIES = {
@@ -900,45 +949,173 @@ def read_all_notifications(db: Session = Depends(get_db), user: ThinkUser = Depe
     return {"ok": True}
 
 
+@app.get("/api/mobile-money/accounts")
+def list_mobile_money_accounts(
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    rows = (
+        db.query(MobileMoneyAccount)
+        .filter(MobileMoneyAccount.user_id == user.id, MobileMoneyAccount.is_active.is_(True))
+        .order_by(MobileMoneyAccount.is_default.desc(), MobileMoneyAccount.created_at.asc())
+        .all()
+    )
+    return {"items": [_serialize_mobile_money_account(row) for row in rows]}
+
+
+@app.post("/api/mobile-money/accounts")
+def add_mobile_money_account(
+    data: MobileMoneyAccountData,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    operator = data.operator.strip().upper()
+    if operator not in PAYOUT_OPERATORS_CD:
+        raise HTTPException(status_code=422, detail="Opérateur Mobile Money non pris en charge pour les retraits RDC.")
+    phone = _normalize_drc_phone(data.phone)
+    ciphertext = _encrypt_mobile_phone(phone)
+    rows = db.query(MobileMoneyAccount).filter(
+        MobileMoneyAccount.user_id == user.id,
+        MobileMoneyAccount.is_active.is_(True),
+    ).all()
+    make_default = data.is_default or not rows
+    if make_default:
+        for existing in rows:
+            existing.is_default = False
+    row = MobileMoneyAccount(
+        user_id=user.id,
+        operator=operator,
+        label=data.label.strip() or "Mon numéro",
+        phone_ciphertext=ciphertext,
+        phone_masked=_mask_mobile_phone(phone),
+        is_default=make_default,
+        is_active=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "account": _serialize_mobile_money_account(row)}
+
+
+@app.post("/api/mobile-money/accounts/{account_id}/default")
+def set_default_mobile_money_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    row = db.query(MobileMoneyAccount).filter(
+        MobileMoneyAccount.id == account_id,
+        MobileMoneyAccount.user_id == user.id,
+        MobileMoneyAccount.is_active.is_(True),
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Numéro Mobile Money introuvable.")
+    db.query(MobileMoneyAccount).filter(
+        MobileMoneyAccount.user_id == user.id,
+        MobileMoneyAccount.is_active.is_(True),
+    ).update({MobileMoneyAccount.is_default: False}, synchronize_session=False)
+    row.is_default = True
+    db.commit()
+    return {"ok": True, "account": _serialize_mobile_money_account(row)}
+
+
+@app.delete("/api/mobile-money/accounts/{account_id}")
+def delete_mobile_money_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    row = db.query(MobileMoneyAccount).filter(
+        MobileMoneyAccount.id == account_id,
+        MobileMoneyAccount.user_id == user.id,
+        MobileMoneyAccount.is_active.is_(True),
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Numéro Mobile Money introuvable.")
+    was_default = row.is_default
+    row.is_active = False
+    row.is_default = False
+    if was_default:
+        replacement = (
+            db.query(MobileMoneyAccount)
+            .filter(MobileMoneyAccount.user_id == user.id, MobileMoneyAccount.is_active.is_(True))
+            .order_by(MobileMoneyAccount.created_at.asc())
+            .first()
+        )
+        if replacement:
+            replacement.is_default = True
+    db.commit()
+    return {"ok": True, "deleted": True}
+
+
 @app.get("/api/withdrawals")
 def withdrawals(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
     rows = (
         db.query(Withdrawal).filter(Withdrawal.user_id == user.id)
         .order_by(Withdrawal.created_at.desc()).limit(100).all()
     )
-    return {
-        "items": [
-            {
-                "public_id": row.public_id,
-                "status": row.status,
-                "operator": row.operator,
-                "phone": row.phone,
-                "amount": float(row.amount),
-                "fee": float(row.fee),
-                "net_amount": float(row.net_amount),
-                "currency": row.currency,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-            }
-            for row in rows
-        ]
-    }
+    return {"items": [_serialize_withdrawal(row) for row in rows]}
 
 
 @app.post("/api/withdrawals")
 def create_withdrawal(
     data: WithdrawalData,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     user: ThinkUser = Depends(get_current_user),
 ):
-    if os.getenv("APP_ENV", "sandbox").lower() != "sandbox":
-        raise HTTPException(status_code=404, detail="Les demandes de retrait Sandbox sont désactivées hors Sandbox.")
+    client = _require_cinetpay_payout_sandbox()
+    currency = data.currency.strip().upper()
+    if currency != "CDF":
+        raise HTTPException(status_code=422, detail="Le PayOut CinetPay configuré pour la RDC utilise actuellement le CDF.")
+    amount_decimal = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    if amount_decimal != data.amount or amount_decimal != amount_decimal.to_integral_value():
+        raise HTTPException(status_code=422, detail="Le montant PayOut CDF doit être un entier.")
+    amount = int(amount_decimal)
+    if amount < PAYOUT_MIN_CDF or amount > PAYOUT_MAX_CDF or amount % 5 != 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Le montant doit être un multiple de 5 compris entre {PAYOUT_MIN_CDF:,} et {PAYOUT_MAX_CDF:,} CDF (plage de validation du SDK installé).",
+        )
 
-    currency = data.currency.upper()
-    if currency not in ALLOWED_CURRENCIES:
-        raise HTTPException(status_code=422, detail="Devise non prise en charge.")
-    amount = data.amount.quantize(CENT, rounding=ROUND_HALF_UP)
-    if amount < Decimal("1.00"):
-        raise HTTPException(status_code=422, detail="Le montant minimum est de 1 unité.")
+    mobile_account = None
+    if data.mobile_money_account_id:
+        mobile_account = db.query(MobileMoneyAccount).filter(
+            MobileMoneyAccount.id == data.mobile_money_account_id,
+            MobileMoneyAccount.user_id == user.id,
+            MobileMoneyAccount.is_active.is_(True),
+        ).first()
+        if mobile_account is None:
+            raise HTTPException(status_code=404, detail="Le numéro Mobile Money sélectionné est introuvable.")
+        operator = mobile_account.operator
+        phone = _decrypt_mobile_phone(mobile_account.phone_ciphertext)
+    else:
+        operator = str(data.operator or "").strip().upper()
+        if operator not in PAYOUT_OPERATORS_CD:
+            raise HTTPException(status_code=422, detail="Choisis Airtel Money, Orange Money ou M-Pesa.")
+        phone = _normalize_drc_phone(data.phone or "")
+
+    if operator not in PAYOUT_OPERATORS_CD:
+        raise HTTPException(status_code=422, detail="Opérateur PayOut non autorisé pour la RDC.")
+    masked_phone = _mask_mobile_phone(phone)
+
+    key = (idempotency_key or ("wdr-" + uuid4().hex)).strip()
+    if not key or len(key) > 128:
+        raise HTTPException(status_code=422, detail="Clé d'idempotence invalide.")
+    fingerprint = hashlib.sha256(
+        f"{amount}|{currency}|{operator}|{phone}".encode("utf-8")
+    ).hexdigest()
+    existing_key = db.query(WithdrawalIdempotency).filter(
+        WithdrawalIdempotency.user_id == user.id,
+        WithdrawalIdempotency.idempotency_key == key,
+    ).first()
+    if existing_key:
+        if existing_key.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="Cette clé d'idempotence a déjà été utilisée pour une autre demande.")
+        existing_row = db.query(Withdrawal).filter(Withdrawal.id == existing_key.withdrawal_id).first()
+        if existing_row is None:
+            raise HTTPException(status_code=409, detail="Cette demande est en cours de rapprochement. Consulte l'historique avant de réessayer.")
+        return {"ok": True, "withdrawal": _serialize_withdrawal(existing_row), "idempotent_replay": True}
 
     wallet_row = (
         db.query(Wallet)
@@ -947,69 +1124,189 @@ def create_withdrawal(
         .first()
     )
     if wallet_row is None:
-        raise HTTPException(status_code=404, detail="Portefeuille introuvable.")
-    if Decimal(wallet_row.available_balance) < amount:
+        raise HTTPException(status_code=404, detail="Portefeuille CDF introuvable.")
+    if Decimal(wallet_row.available_balance) < amount_decimal:
         raise HTTPException(
             status_code=409,
             detail=f"Solde insuffisant. Disponible : {wallet_row.available_balance} {currency}.",
         )
 
-    fee = (amount * THINK_FEE_RATE).quantize(CENT, rounding=ROUND_HALF_UP)
-    net_amount = amount - fee
     public_id = "WDR-" + uuid4().hex[:16].upper()
-
-    wallet_row.available_balance = Decimal(wallet_row.available_balance) - amount
-    wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) + amount
+    wallet_row.available_balance = Decimal(wallet_row.available_balance) - amount_decimal
+    wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) + amount_decimal
     row = Withdrawal(
         public_id=public_id,
         user_id=user.id,
         wallet_id=wallet_row.id,
-        amount=amount,
-        fee=fee,
-        net_amount=net_amount,
+        amount=amount_decimal,
+        fee=Decimal("0"),
+        net_amount=amount_decimal,
         currency=currency,
-        operator=data.operator.strip(),
-        phone=data.phone.strip(),
-        status="sandbox_pending",
-        provider_response={"test_mode": True, "no_real_payout": True},
+        operator=operator,
+        # Do not keep an unencrypted beneficiary number in the withdrawal row.
+        phone=masked_phone,
+        status="payout_initializing",
+        provider_response={
+            "environment": "sandbox",
+            "provider": "cinetpay_api_v1",
+            "no_real_money": True,
+            "recipient_phone_ciphertext": _encrypt_mobile_phone(phone),
+            "request_key": key,
+        },
     )
     db.add(row)
-    db.flush()
-    db.add(LedgerEntry(
-        wallet_id=wallet_row.id,
-        entry_type="WITHDRAWAL",
-        amount=-amount,
-        currency=currency,
-        status="reserved",
-        reference=public_id,
-        related_type="withdrawal",
-        related_id=str(row.id),
-        description="Montant réservé pour une demande de retrait Sandbox.",
-        extra_data={"no_real_payout": True},
-    ))
-    notify_user(
-        db, user.id, "Demande de retrait enregistrée",
-        f"Demande Sandbox {public_id} : {amount} {currency} vers {data.operator}. "
-        "Aucun paiement Mobile Money réel n'a été envoyé.",
-        "finance",
-    )
-    db.commit()
-    db.refresh(row)
-    return {
-        "ok": True,
-        "withdrawal": {
-            "public_id": row.public_id,
-            "status": row.status,
-            "operator": row.operator,
-            "phone": row.phone,
-            "amount": float(row.amount),
-            "fee": float(row.fee),
-            "net_amount": float(row.net_amount),
-            "currency": row.currency,
-        },
-        "test_mode": True,
-        "no_real_payout": True,
-    }
+    try:
+        db.flush()
+        db.add(LedgerEntry(
+            wallet_id=wallet_row.id,
+            entry_type="WITHDRAWAL",
+            amount=-amount_decimal,
+            currency=currency,
+            status="reserved",
+            reference=public_id,
+            related_type="withdrawal",
+            related_id=str(row.id),
+            description="Montant réservé avant un transfert CinetPay PayOut Sandbox.",
+            extra_data={"provider": "cinetpay_api_v1", "test_mode": True, "no_real_money": True},
+        ))
+        db.add(WithdrawalIdempotency(
+            user_id=user.id,
+            idempotency_key=key,
+            request_fingerprint=fingerprint,
+            withdrawal_id=row.id,
+        ))
+        notify_user(
+            db, user.id, "Retrait PayOut en cours",
+            f"Le montant de {amount_decimal} CDF est réservé pour le test PayOut vers {operator}. Aucun fonds réel ne sera transféré en Sandbox.",
+            "finance",
+        )
+        db.commit()
+        db.refresh(row)
+    except IntegrityError:
+        db.rollback()
+        existing_key = db.query(WithdrawalIdempotency).filter(
+            WithdrawalIdempotency.user_id == user.id,
+            WithdrawalIdempotency.idempotency_key == key,
+        ).first()
+        if existing_key and existing_key.request_fingerprint == fingerprint:
+            existing_row = db.query(Withdrawal).filter(Withdrawal.id == existing_key.withdrawal_id).first()
+            if existing_row:
+                return {"ok": True, "withdrawal": _serialize_withdrawal(existing_row), "idempotent_replay": True}
+        raise HTTPException(status_code=409, detail="Demande PayOut déjà reçue. Vérifie son statut avant toute nouvelle tentative.") from None
+
+    try:
+        from cinetpay import TransferRequest
+
+        notify_url = _cinetpay_payout_notify_url()
+        request_data = TransferRequest(
+            currency="CDF",
+            merchant_transaction_id=row.public_id,
+            phone_number=phone,
+            amount=amount,
+            payment_method=operator,
+            reason="Retrait Think Sandbox",
+            notify_url=notify_url,
+        )
+        provider_response = client.transfer.create(request_data, "CD")
+        if provider_response.merchant_transaction_id != row.public_id:
+            raise RuntimeError("merchant_transaction_id_mismatch")
+        if not provider_response.transaction_id or not provider_response.notify_token:
+            raise RuntimeError("missing_provider_transaction_or_notify_token")
+
+        response_data = dict(row.provider_response or {})
+        response_data.update({
+            "notify_token": provider_response.notify_token,
+            "provider_initial_status": str(provider_response.status),
+            "provider_initial_code": provider_response.code,
+        })
+        row.provider_transaction_id = provider_response.transaction_id
+        row.provider_response = response_data
+        row.status = "payout_pending"
+        db.commit()
+        db.refresh(row)
+
+        provider_status = client.transfer.get_status(provider_response.transaction_id, "CD")
+        row = _sync_cinetpay_withdrawal_status(db, row, provider_status)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # A timeout may happen after CinetPay has accepted a transfer. Keep funds
+        # reserved and require a status lookup by merchant reference; never retry blindly.
+        db.refresh(row)
+        response_data = dict(row.provider_response or {})
+        response_data["initialization_error_type"] = type(exc).__name__
+        response_data["last_check_error_at"] = datetime.now(timezone.utc).isoformat()
+        row.provider_response = response_data
+        if row.status not in {"payout_success", "payout_failed"}:
+            row.status = "payout_unknown"
+        db.commit()
+        logger.warning("CinetPay Sandbox PayOut unresolved for %s (%s).", row.public_id, type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"CinetPay n'a pas confirmé le retrait. Référence Think : {row.public_id}. Vérifie son statut avant de réessayer.",
+        ) from None
+
+    return {"ok": True, "withdrawal": _serialize_withdrawal(row), "test_mode": True, "no_real_money": True}
+
+
+@app.post("/api/withdrawals/{public_id}/refresh")
+def refresh_withdrawal(
+    public_id: str,
+    db: Session = Depends(get_db),
+    user: ThinkUser = Depends(get_current_user),
+):
+    row = db.query(Withdrawal).filter(
+        Withdrawal.public_id == public_id,
+        Withdrawal.user_id == user.id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Demande de retrait introuvable.")
+    if row.status in {"payout_success", "payout_failed"}:
+        return {"withdrawal": _serialize_withdrawal(row), "final": True}
+    client = _require_cinetpay_payout_sandbox()
+    identifier = row.provider_transaction_id or row.public_id
+    try:
+        provider_status = client.transfer.get_status(identifier, "CD")
+    except Exception as exc:
+        logger.warning("CinetPay PayOut status query unresolved for %s (%s).", row.public_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Le statut CinetPay reste indisponible. Le montant demeure réservé.") from None
+    synced = _sync_cinetpay_withdrawal_status(db, row, provider_status)
+    return {"withdrawal": _serialize_withdrawal(synced), "final": synced.status in {"payout_success", "payout_failed"}}
+
+
+@app.api_route("/api/cinetpay/payout/notify", methods=["GET", "POST"])
+async def cinetpay_payout_notify(request: Request, db: Session = Depends(get_db)):
+    if request.method == "GET":
+        return {"ok": True, "service": "cinetpay-payout-notify"}
+    try:
+        from cinetpay import parse_notification, verify_notification
+        payload = parse_notification(await request.json())
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Le SDK CinetPay est indisponible.") from None
+    except Exception:
+        raise HTTPException(status_code=400, detail="Notification PayOut invalide ou incomplète.") from None
+
+    row = db.query(Withdrawal).filter(
+        Withdrawal.public_id == payload.merchant_transaction_id,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Référence PayOut inconnue.")
+    expected_token = str((row.provider_response or {}).get("notify_token") or "")
+    if not expected_token or not verify_notification(expected_token, payload.notify_token):
+        raise HTTPException(status_code=401, detail="Jeton de notification PayOut invalide.")
+    if row.provider_transaction_id and row.provider_transaction_id != payload.transaction_id:
+        raise HTTPException(status_code=409, detail="Référence transaction de notification incohérente.")
+    if row.status in {"payout_success", "payout_failed"}:
+        return {"ok": True, "public_id": row.public_id, "status": row.status, "duplicate": True}
+
+    client = _require_cinetpay_payout_sandbox()
+    try:
+        provider_status = await run_in_threadpool(client.transfer.get_status, payload.transaction_id, "CD")
+    except Exception as exc:
+        logger.warning("CinetPay PayOut webhook verification failed for %s (%s).", row.public_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="La vérification PayOut a échoué. CinetPay pourra renvoyer la notification.") from None
+    synced = _sync_cinetpay_withdrawal_status(db, row, provider_status)
+    return {"ok": True, "public_id": synced.public_id, "status": synced.status}
 
 
 @app.get("/api/transfers")
@@ -1438,10 +1735,20 @@ def _cinetpay_environment_status() -> dict[str, Any]:
         ready = False
         message = "CINETPAY_MODE doit être sandbox ou production."
 
+    payout_sandbox_enabled = (
+        _truthy_env("CINETPAY_PAYOUT_SANDBOX_ENABLED")
+        and mode == "sandbox"
+        and app_env == "sandbox"
+        and api_key.startswith("sk_test_")
+        and bool(api_password)
+    )
+
     return {
         "enabled": ready,
         "payin_enabled": ready,
-        "payout_enabled": False,  # PayOut stays blocked until CinetPay confirms activation.
+        "payout_enabled": False,  # Real PayOut is never enabled by this sandbox code path.
+        "payout_sandbox_enabled": payout_sandbox_enabled,
+        "payout_mode": "sandbox_only" if payout_sandbox_enabled else "disabled",
         "mode": mode if mode in {"sandbox", "production"} else "unknown",
         "country": "CD",
         "currency": os.getenv("CINETPAY_CURRENCY", "CDF").strip().upper(),
@@ -1491,6 +1798,251 @@ def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
         parsed.hostname == expected_host or parsed.hostname.endswith("." + expected_host)
     ):
         raise HTTPException(status_code=502, detail="CinetPay a retourné une URL de paiement inattendue.")
+
+
+PAYOUT_OPERATORS_CD = {"AIRTEL_CD", "OM_CD", "MPESA_CD"}
+PAYOUT_MIN_CDF = 100
+PAYOUT_MAX_CDF = 1_500_000  # Limit imposed by the installed CinetPay Python SDK; confirm merchant-specific cap.
+
+
+def _mobile_money_fernet() -> Fernet:
+    raw_key = os.getenv("MOBILE_MONEY_ENCRYPTION_KEY", "").strip()
+    if not raw_key:
+        raise HTTPException(
+            status_code=503,
+            detail="La variable MOBILE_MONEY_ENCRYPTION_KEY doit être configurée pour protéger les numéros Mobile Money.",
+        )
+    try:
+        return Fernet(raw_key.encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        raise HTTPException(status_code=503, detail="MOBILE_MONEY_ENCRYPTION_KEY est invalide.") from None
+
+
+def _normalize_drc_phone(raw_phone: str) -> str:
+    value = re.sub(r"[\s().-]", "", str(raw_phone or ""))
+    digits = re.sub(r"\D", "", value)
+    if digits.startswith("00243"):
+        digits = digits[5:]
+    elif digits.startswith("243"):
+        digits = digits[3:]
+    elif digits.startswith("0"):
+        digits = digits[1:]
+    if not re.fullmatch(r"\d{9}", digits):
+        raise HTTPException(
+            status_code=422,
+            detail="Numéro RDC invalide. Utilise un numéro à 9 chiffres ou le format international +243…",
+        )
+    return "+243" + digits
+
+
+def _mask_mobile_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone)
+    return "+243 ••• ••• " + digits[-4:]
+
+
+def _encrypt_mobile_phone(phone: str) -> str:
+    return _mobile_money_fernet().encrypt(phone.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_mobile_phone(ciphertext: str) -> str:
+    try:
+        return _mobile_money_fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError, ValueError):
+        raise HTTPException(
+            status_code=503,
+            detail="Impossible de déchiffrer ce numéro Mobile Money. Vérifie la clé MOBILE_MONEY_ENCRYPTION_KEY.",
+        ) from None
+
+
+def _serialize_mobile_money_account(row: MobileMoneyAccount) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "operator": row.operator,
+        "operator_label": {"AIRTEL_CD": "Airtel Money", "OM_CD": "Orange Money", "MPESA_CD": "M-Pesa"}.get(row.operator, row.operator),
+        "label": row.label,
+        "phone_masked": row.phone_masked,
+        "is_default": row.is_default,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def _serialize_withdrawal(row: Withdrawal) -> dict[str, Any]:
+    state_labels = {
+        "payout_initializing": "Initialisation CinetPay",
+        "payout_pending": "Transfert en attente",
+        "payout_unknown": "Résultat à vérifier",
+        "payout_success": "Transfert confirmé (Sandbox)",
+        "payout_failed": "Transfert échoué",
+        "sandbox_pending": "Ancienne demande simulée",
+    }
+    return {
+        "public_id": row.public_id,
+        "status": row.status,
+        "status_label": state_labels.get(row.status, row.status),
+        "operator": row.operator,
+        "phone": row.phone,
+        "amount": float(row.amount),
+        "fee": float(row.fee),
+        "net_amount": float(row.net_amount),
+        "currency": row.currency,
+        "provider_transaction_id": row.provider_transaction_id,
+        "test_mode": True,
+        "no_real_money": True,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def _require_cinetpay_payout_sandbox():
+    status = _cinetpay_environment_status()
+    if (
+        os.getenv("APP_ENV", "sandbox").strip().lower() != "sandbox"
+        or os.getenv("CINETPAY_MODE", "sandbox").strip().lower() != "sandbox"
+    ):
+        raise HTTPException(status_code=404, detail="PayOut CinetPay réel désactivé : cette route est réservée au Sandbox.")
+    if not status.get("payout_sandbox_enabled"):
+        raise HTTPException(
+            status_code=503,
+            detail="PayOut Sandbox désactivé. Configure les clés test puis CINETPAY_PAYOUT_SANDBOX_ENABLED=true.",
+        )
+    api_key = os.getenv("CINETPAY_API_KEY_CD", "").strip()
+    api_password = os.getenv("CINETPAY_API_PASSWORD_CD", "").strip()
+    try:
+        from cinetpay import CinetPayClient, ClientConfig, CountryCredentials
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Le SDK CinetPay est indisponible.") from None
+    return _cached_cinetpay_client(api_key, api_password)
+
+
+def _cinetpay_payout_notify_url() -> str:
+    base = os.getenv(
+        "THINK_PUBLIC_BASE_URL",
+        "https://think-crypt-entreprise.onrender.com",
+    ).strip().rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(status_code=503, detail="THINK_PUBLIC_BASE_URL doit être une URL HTTPS publique valide.")
+    url = base + "/api/cinetpay/payout/notify"
+    if len(url) > 120:
+        raise HTTPException(status_code=503, detail="L'URL de notification PayOut dépasse 120 caractères.")
+    return url
+
+
+def _sync_cinetpay_withdrawal_status(
+    db: Session,
+    withdrawal: Withdrawal,
+    provider_status: Any,
+) -> Withdrawal:
+    merchant_id = str(getattr(provider_status, "merchant_transaction_id", "") or "")
+    provider_id = str(getattr(provider_status, "transaction_id", "") or "")
+    provider_state = str(getattr(provider_status, "status", "") or "").upper()
+
+    if merchant_id != withdrawal.public_id:
+        raise HTTPException(status_code=409, detail="La référence marchand PayOut ne correspond pas.")
+    if not provider_id or (
+        withdrawal.provider_transaction_id and provider_id != withdrawal.provider_transaction_id
+    ):
+        raise HTTPException(status_code=409, detail="La référence transaction PayOut ne correspond pas.")
+
+    provider_amount = str(getattr(provider_status, "amount", "") or "").strip()
+    if provider_amount:
+        try:
+            if Decimal(provider_amount) != Decimal(withdrawal.net_amount):
+                raise HTTPException(status_code=409, detail="Le montant retourné par CinetPay ne correspond pas au retrait.")
+        except (ValueError, ArithmeticError):
+            raise HTTPException(status_code=502, detail="Montant PayOut retourné par CinetPay invalide.") from None
+
+    provider_currency = str(getattr(provider_status, "currency", "") or "").strip().upper()
+    if provider_currency and provider_currency != withdrawal.currency:
+        raise HTTPException(status_code=409, detail="La devise retournée par CinetPay ne correspond pas au retrait.")
+
+    locked = (
+        db.query(Withdrawal)
+        .filter(Withdrawal.id == withdrawal.id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Demande de retrait introuvable.")
+    if locked.status in {"payout_success", "payout_failed"}:
+        return locked
+
+    wallet_row = (
+        db.query(Wallet)
+        .filter(Wallet.id == locked.wallet_id, Wallet.user_id == locked.user_id)
+        .with_for_update()
+        .first()
+    )
+    if wallet_row is None:
+        raise HTTPException(status_code=404, detail="Portefeuille de retrait introuvable.")
+
+    response_data = dict(locked.provider_response or {})
+    response_data["last_provider_status"] = provider_state
+    response_data["last_provider_code"] = getattr(provider_status, "code", None)
+    response_data["last_provider_check_at"] = datetime.now(timezone.utc).isoformat()
+    response_data["provider_fee_amount"] = str(getattr(provider_status, "fee_amount", "") or "")
+    locked.provider_response = response_data
+    locked.provider_transaction_id = provider_id
+
+    amount = Decimal(locked.amount)
+    if provider_state == "SUCCESS":
+        if Decimal(wallet_row.reserved_balance) < amount:
+            raise HTTPException(status_code=409, detail="Le solde réservé ne correspond pas à cette demande.")
+        wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) - amount
+        ledger = db.query(LedgerEntry).filter(LedgerEntry.reference == locked.public_id).first()
+        if ledger is None:
+            raise HTTPException(status_code=409, detail="Écriture de réservation du retrait introuvable.")
+        ledger.status = "confirmed"
+        ledger.description = "Transfert Mobile Money confirmé par CinetPay Sandbox."
+        ledger.extra_data = {
+            **(ledger.extra_data or {}),
+            "provider": "cinetpay_api_v1",
+            "provider_transaction_id": provider_id,
+            "test_mode": True,
+            "no_real_money": True,
+        }
+        locked.status = "payout_success"
+        notify_user(
+            db, locked.user_id, "Retrait confirmé (Sandbox)",
+            f"Le retrait test {locked.public_id} de {locked.amount} {locked.currency} est confirmé par CinetPay Sandbox. Aucun argent réel n'a été transféré.",
+            "finance",
+        )
+    elif provider_state in {"FAILED", "TRANSACTION_EXIST", "INSUFFICIENT_BALANCE", "USER_NOT_FOUND", "USER_IS_BLOCKED", "EXPIRED", "NOT_ALLOWED"}:
+        if Decimal(wallet_row.reserved_balance) < amount:
+            raise HTTPException(status_code=409, detail="Le solde réservé ne correspond pas à ce retrait.")
+        wallet_row.reserved_balance = Decimal(wallet_row.reserved_balance) - amount
+        wallet_row.available_balance = Decimal(wallet_row.available_balance) + amount
+        ledger = db.query(LedgerEntry).filter(LedgerEntry.reference == locked.public_id).first()
+        if ledger is None:
+            raise HTTPException(status_code=409, detail="Écriture de réservation du retrait introuvable.")
+        ledger.status = "reversed"
+        ledger.description = "Réservation libérée après échec confirmé par CinetPay."
+        release_reference = "WDR-REL-" + locked.public_id
+        if db.query(LedgerEntry).filter(LedgerEntry.reference == release_reference).first() is None:
+            db.add(LedgerEntry(
+                wallet_id=wallet_row.id,
+                entry_type="WITHDRAWAL_RELEASE",
+                amount=amount,
+                currency=locked.currency,
+                status="confirmed",
+                reference=release_reference,
+                related_type="withdrawal",
+                related_id=str(locked.id),
+                description="Montant restitué après échec confirmé du PayOut Sandbox.",
+                extra_data={"provider": "cinetpay_api_v1", "no_real_money": True},
+            ))
+        locked.status = "payout_failed"
+        notify_user(
+            db, locked.user_id, "Retrait échoué",
+            f"Le retrait test {locked.public_id} a échoué. Le montant réservé a été rendu au portefeuille.",
+            "finance",
+        )
+    else:
+        locked.status = "payout_pending"
+
+    db.commit()
+    db.refresh(locked)
+    return locked
 
 
 @app.get("/api/cinetpay/status")
@@ -1707,6 +2259,20 @@ def create_payment(
         last_name = last_name.strip() or " ".join(parts[1:])
 
     description = re.sub(r"[^A-Za-z0-9À-ÿ .'-]", " ", data.description).strip() or "Depot Think"
+    client_phone_number = None
+    if data.mobile_money_account_id:
+        mobile_account = db.query(MobileMoneyAccount).filter(
+            MobileMoneyAccount.id == data.mobile_money_account_id,
+            MobileMoneyAccount.user_id == user.id,
+            MobileMoneyAccount.is_active.is_(True),
+        ).first()
+        if mobile_account is None:
+            raise HTTPException(status_code=404, detail="Le numéro Mobile Money sélectionné est introuvable.")
+        mobile_phone = _decrypt_mobile_phone(mobile_account.phone_ciphertext)
+        if payment_method and payment_method != mobile_account.operator:
+            raise HTTPException(status_code=422, detail="Le réseau choisi ne correspond pas au numéro Mobile Money sélectionné.")
+        payment_method = payment_method or mobile_account.operator
+        client_phone_number = mobile_phone
     notify_url = os.getenv(
         "CINETPAY_NOTIFY_URL",
         "https://think-crypt-entreprise.onrender.com/api/cinetpay/payin/notify",
@@ -1731,6 +2297,7 @@ def create_payment(
             notify_url=notify_url,
             channel="PUSH",
             payment_method=payment_method,
+            client_phone_number=client_phone_number,
         )
         provider_response = client.payment.initialize(request_data, "CD")
         try:
@@ -1881,3 +2448,5 @@ def cinetpay_payin_return(payment: str, result: str = "returned"):
     )
 
 
+
+cryptography>=42.0.0
