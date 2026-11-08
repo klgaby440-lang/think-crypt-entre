@@ -1805,6 +1805,10 @@ def _cinetpay_error_log_fields(exc: Exception) -> tuple[str, str, str, str]:
     api_status = str(getattr(exc, "api_status", "") or "")[:80]
     description = str(getattr(exc, "description", "") or "")
     description = re.sub(r"\s+", " ", description).strip()
+    # AuthenticationError intentionally exposes only a generic SDK message,
+    # e.g. "no access_token in response"; include it for diagnosis.
+    safe_message = str(exc) if error_type == "AuthenticationError" else ""
+    safe_message = re.sub(r"\s+", " ", safe_message).strip()[:180]
     description = re.sub(
         r"(?i)\bsk_(?:test|live)_[A-Za-z0-9_-]+\b",
         "[REDACTED]",
@@ -1816,7 +1820,7 @@ def _cinetpay_error_log_fields(exc: Exception) -> tuple[str, str, str, str]:
         description,
     )
     description = description[:240]
-    return error_type, str(api_code)[:32], api_status, description
+    return error_type, str(api_code)[:32], api_status, description or safe_message
 
 
 @lru_cache(maxsize=2)
