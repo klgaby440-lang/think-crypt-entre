@@ -307,6 +307,18 @@ jobs:
               assert payout_pending.status_code == 200, payout_pending.text
               assert payout_pending.json()["withdrawal"]["status"] == "payout_pending"
               assert fake_transfer_api.create.call_count == 2
+
+              # Do not permit a second payout while the first one is unresolved.
+              blocked_payout = client.post("/api/withdrawals", headers={
+                  **headers, "Idempotency-Key": "alice-cinetpay-payout-while-pending-003"
+              }, json={
+                  "amount": "100",
+                  "currency": "CDF",
+                  "mobile_money_account_id": airtel_account.json()["account"]["id"],
+              })
+              assert blocked_payout.status_code == 409, blocked_payout.text
+              assert fake_transfer_api.create.call_count == 2
+
               pending_provider_id = "ci-payout-2"
               payout_statuses[pending_provider_id].status = "FAILED"
               payout_statuses[pending_provider_id].code = 2010
