@@ -2259,18 +2259,19 @@ body.dark .llink-local-menu{background:var(--bg,#101016)!important;color:var(--t
         window.history.replaceState(null, "", cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
       } catch (_) {}
     }
-    const [me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription, payments, cinetpay] = await Promise.all([
+    const [me, wallet, transfers, internalTransfers, withdrawals, mobileMoneyAccounts, notifications, subscription, payments, cinetpay] = await Promise.all([
       window.thinkApiRequest("/api/me"),
       window.thinkApiRequest("/api/wallet"),
       window.thinkApiRequest("/api/transfers"),
       window.thinkApiRequest("/api/internal-transfers"),
       window.thinkApiRequest("/api/withdrawals"),
+      window.thinkApiRequest("/api/mobile-money/accounts"),
       window.thinkApiRequest("/api/notifications"),
       window.thinkApiRequest("/api/subscriptions"),
       window.thinkApiRequest("/api/payments"),
       window.thinkApiRequest("/api/cinetpay/status")
     ]);
-    const state = { me, wallet, transfers, internalTransfers, withdrawals, notifications, subscription, payments, cinetpay, loadedAt: Date.now() };
+    const state = { me, wallet, transfers, internalTransfers, withdrawals, mobileMoneyAccounts, notifications, subscription, payments, cinetpay, loadedAt: Date.now() };
     window.THINK_SERVER_STATE = state;
     try {
       localStorage.setItem("think-transfer-history", JSON.stringify(transfers.items || []));
@@ -5792,7 +5793,7 @@ function initWalletInterface(){
         accounts:["Comptes","Tous tes comptes et moyens de paiement au même endroit.",`<div class="wallet-option-grid">
           <button class="wallet-option" data-wallet-detail="bank"><div class="wallet-option-icon">🏦</div><div class="wallet-option-title">Compte bancaire</div><div class="wallet-option-meta">Connecter ou gérer un compte.</div></button>
           <button class="wallet-option" data-wallet-detail="card"><div class="wallet-option-icon">💳</div><div class="wallet-option-title">Carte bancaire</div><div class="wallet-option-meta">Ajouter et gérer une carte.</div></button>
-          <button class="wallet-option" data-wallet-detail="mobile"><div class="wallet-option-icon">📱</div><div class="wallet-option-title">Service d’agence</div><div class="wallet-option-meta">13 services d’agence disponibles.</div></button>
+          <button class="wallet-option" data-wallet-detail="mobile"><div class="wallet-option-icon">📱</div><div class="wallet-option-title">Numéros Mobile Money</div><div class="wallet-option-meta">Enregistre plusieurs numéros Airtel, Orange et M-Pesa.</div></button>
           <button class="wallet-option" data-wallet-detail="manage"><div class="wallet-option-icon">⚙️</div><div class="wallet-option-title">Gérer mes moyens</div><div class="wallet-option-meta">Choisir, ajouter ou retirer un moyen.</div></button></div>`],
         country:["Monnaie & pays","Adapte l’affichage de ton portefeuille à ton pays.",`<div class="wallet-detail-box"><strong>Pays et monnaie actuelle</strong><p>Choisis un pays pour adapter la devise affichée.</p><select class="wallet-select" id="walletCountry"><option value="CD">🇨🇩 RDC · CDF</option><option value="US">🇺🇸 États-Unis · USD</option><option value="FR">🇫🇷 France · EUR</option><option value="GB">🇬🇧 Royaume-Uni · GBP</option><option value="CN">🇨🇳 Chine · CNY</option><option value="IN">🇮🇳 Inde · INR</option><option value="BR">🇧🇷 Brésil · BRL</option><option value="SA">🇸🇦 Arabie saoudite · SAR</option><option value="RU">🇷🇺 Russie · RUB</option><option value="BD">🇧🇩 Bangladesh · BDT</option><option value="ID">🇮🇩 Indonésie · IDR</option><option value="TR">🇹🇷 Turquie · TRY</option></select><div class="wallet-meta" id="walletLocalHint">CDF pris en compte pour la RDC</div></div><div class="wallet-option-grid"><button class="wallet-option" data-wallet-detail="local"><div class="wallet-option-icon">🌍</div><div class="wallet-option-title">Monnaie locale</div><div class="wallet-option-meta">Utiliser la devise du pays sélectionné.</div></button><button class="wallet-option" data-wallet-detail="adapt"><div class="wallet-option-icon">🔄</div><div class="wallet-option-title">Adaptation automatique</div><div class="wallet-option-meta">Préparer l’affichage pour un changement de pays.</div></button></div>`],
         travel:["Voyage & mouvements","Prépare tes déplacements et suis les mouvements du portefeuille.",`<div class="wallet-option-grid">
@@ -5833,12 +5834,12 @@ function initWalletInterface(){
     function walletDetailAction(action){
       if(action==="transfer"){showContent("Transactions","Transferts et services financiers",getPageContent("Transactions"));return;}
       const panels={
-        add:["Ajouter de l’argent","Dépôt CinetPay Sandbox et crédits fictifs locaux pour les essais.",`<div class="wallet-flow-note"><strong>CinetPay PayIn · ${window.THINK_SERVER_STATE?.cinetpay?.mode==="sandbox"?"Sandbox":"Configuration"}</strong><span>${txEscapeHtml(window.THINK_SERVER_STATE?.cinetpay?.message||"Vérification de la configuration CinetPay…")} Aucun retrait PayOut réel n'est activé.</span></div><form id="walletCinetPayForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant à déposer (CDF)<input name="amount" type="number" min="100" max="2500000" step="5" required placeholder="1000"></label><label class="wallet-form-field">Réseau<select name="payment_method"><option value="">Choix sur le guichet CinetPay</option><option value="OM_CD">Orange Money</option><option value="AIRTEL_CD">Airtel Money</option><option value="MPESA_CD">M-Pesa</option><option value="AFRICELL_CD">Africell</option></select></label></div><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit" ${window.THINK_SERVER_STATE?.cinetpay?.payin_enabled===true?"":"disabled"}>${window.THINK_SERVER_STATE?.cinetpay?.payin_enabled===true?"Continuer vers CinetPay":"PayIn CinetPay indisponible"}</button></div><p class="wallet-flow-note">Le portefeuille sera crédité uniquement après confirmation du paiement par l'API CinetPay et réception/vérification de sa notification. Montants en CDF entiers, multiple de 5.</p></form><div class="wallet-detail-box"><strong>Autre outil de test local</strong><p>Le crédit fictif ci-dessous ne contacte pas CinetPay et ne représente aucun paiement effectué.</p></div><form id="walletSandboxCreditForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant fictif<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0,00"></label><label class="wallet-form-field">Devise<select name="currency">${Object.keys(walletCurrencies).map(code=>`<option value="${code}" ${code===walletCurrency?"selected":""}>${code}</option>`).join("")}</select></label></div><label class="wallet-form-field">Motif<input name="reason" maxlength="200" placeholder="Test de portefeuille"></label><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Ajouter un solde fictif</button></div></form>`],
-        withdraw:["Retirer de l’argent","Choisis l’agence dans laquelle se trouve ton argent.",`<div class="wallet-flow-note"><strong>Choisis parmi nos 13 agences.</strong><span>Think reprend exactement les agences et les logos utilisés dans Transactions.</span></div>${agencyGrid()}<div class="wallet-detail-box"><strong>Étape suivante</strong><p id="walletWithdrawHint">Sélectionne une agence pour afficher le parcours de retrait.</p></div>`],
+        add:["Ajouter de l’argent","Dépôt CinetPay Sandbox et crédits fictifs locaux pour les essais.",`<div class="wallet-flow-note"><strong>CinetPay PayIn · ${window.THINK_SERVER_STATE?.cinetpay?.mode==="sandbox"?"Sandbox":"Configuration"}</strong><span>${txEscapeHtml(window.THINK_SERVER_STATE?.cinetpay?.message||"Vérification de la configuration CinetPay…")} Aucun retrait PayOut réel n'est activé.</span></div><form id="walletCinetPayForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant à déposer (CDF)<input name="amount" type="number" min="100" max="2500000" step="5" required placeholder="1000"></label><label class="wallet-form-field">Réseau<select name="payment_method"><option value="">Choix sur le guichet CinetPay</option><option value="OM_CD">Orange Money</option><option value="AIRTEL_CD">Airtel Money</option><option value="MPESA_CD">M-Pesa</option><option value="AFRICELL_CD">Africell</option></select></label></div><label class="wallet-form-field">Numéro Mobile Money enregistré (facultatif)<select name="mobile_money_account_id" id="walletPayinMobileAccount"><option value="">Choisir le numéro sur le guichet CinetPay</option></select></label><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit" ${window.THINK_SERVER_STATE?.cinetpay?.payin_enabled===true?"":"disabled"}>${window.THINK_SERVER_STATE?.cinetpay?.payin_enabled===true?"Continuer vers CinetPay":"PayIn CinetPay indisponible"}</button></div><p class="wallet-flow-note">Le portefeuille sera crédité uniquement après confirmation du paiement par l'API CinetPay et réception/vérification de sa notification. Montants en CDF entiers, multiple de 5.</p></form><div class="wallet-detail-box"><strong>Autre outil de test local</strong><p>Le crédit fictif ci-dessous ne contacte pas CinetPay et ne représente aucun paiement effectué.</p></div><form id="walletSandboxCreditForm"><div class="wallet-form-row"><label class="wallet-form-field">Montant fictif<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0,00"></label><label class="wallet-form-field">Devise<select name="currency">${Object.keys(walletCurrencies).map(code=>`<option value="${code}" ${code===walletCurrency?"selected":""}>${code}</option>`).join("")}</select></label></div><label class="wallet-form-field">Motif<input name="reason" maxlength="200" placeholder="Test de portefeuille"></label><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Ajouter un solde fictif</button></div></form>`],
+        withdraw:["Retirer de l’argent","Envoie un retrait test depuis ton portefeuille Think vers l’un de tes numéros Mobile Money.","<div class=\"wallet-flow-note\"><strong>CinetPay PayOut · Sandbox</strong><span id=\"walletPayoutAvailability\">Vérification de la configuration… Aucun transfert réel ne sera exécuté.</span></div><form id=\"walletWithdrawForm\" class=\"wallet-form\"><label class=\"wallet-form-field\">Numéro de destination<select required name=\"mobile_money_account_id\" id=\"walletWithdrawAccounts\"><option value=\"\">Chargement des numéros enregistrés…</option></select></label><div class=\"wallet-form-row\"><label class=\"wallet-form-field\">Montant à retirer (CDF)<input name=\"amount\" type=\"number\" min=\"100\" max=\"1500000\" step=\"5\" required placeholder=\"1000\"></label><label class=\"wallet-form-field\">Devise<input value=\"CDF\" readonly aria-readonly=\"true\"></label></div><div class=\"wallet-flow-note\"><strong>Limites du test</strong><span>Minimum 100 CDF. Maximum technique du SDK installé : 1 500 000 CDF. Le contrat RDC peut imposer une autre limite ; nous attendons confirmation.</span></div><div class=\"wallet-action-row\"><button class=\"wallet-primary-btn\" id=\"walletPayoutSubmit\" type=\"submit\" disabled>PayOut Sandbox indisponible</button></div></form><div id=\"walletPayoutResult\" class=\"wallet-flow-note\" aria-live=\"polite\"></div><div class=\"wallet-detail-box\"><strong>Historique des retraits</strong><div id=\"walletWithdrawHistory\"><p>Chargement…</p></div></div>"],
         balanceView:["Mon solde","Ton solde personnel et sa devise actuelle.",`<div class="wallet-detail-stat-grid"><div class="wallet-detail-stat"><span>Disponible</span><strong id="walletBalanceAvailable">0,00 CDF</strong></div><div class="wallet-detail-stat"><span>Devise</span><strong id="walletBalanceCurrency">CDF</strong></div><div class="wallet-detail-stat"><span>Statut</span><strong>En attente</strong></div></div>`],
         bank:["Compte bancaire","Ajoute un compte et prépare un virement bancaire sécurisé.",`<form class="wallet-form" id="walletBankForm"><div class="wallet-form-row"><label class="wallet-form-field">Titulaire du compte<input required name="holder" autocomplete="name" placeholder="Nom complet"></label><label class="wallet-form-field">Pays<select required name="country"><option>RDC</option><option>France</option><option>États-Unis</option><option>Royaume-Uni</option><option>Autre</option></select></label></div><div class="wallet-form-row"><label class="wallet-form-field">Banque<input required name="bank" autocomplete="organization" placeholder="Nom de la banque"></label><label class="wallet-form-field">Type<select required name="type"><option>Compte courant</option><option>Compte épargne</option></select></label></div><div class="wallet-form-row"><label class="wallet-form-field">IBAN / numéro de compte<input required name="account" autocomplete="off" placeholder="Numéro ou IBAN"></label><label class="wallet-form-field">BIC / SWIFT<input name="swift" autocomplete="off" placeholder="BIC / SWIFT si nécessaire"></label></div><div class="wallet-form-row"><label class="wallet-form-field">Devise<select name="currency"><option>USD</option><option>EUR</option><option>CDF</option><option>GBP</option></select></label><label class="wallet-form-field">Nom du bénéficiaire<input name="beneficiary" autocomplete="name" placeholder="Nom du titulaire"></label></div><div class="wallet-flow-note"><strong>Virement bancaire</strong><span>La validation réelle devra passer par la banque ou un prestataire de paiement connecté et autorisé.</span></div><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Enregistrer le compte</button></div></form>`],
         card:["Carte bancaire","Ajoute une carte pour préparer des paiements ou alimenter ton portefeuille.",`<form class="wallet-form" id="walletCardForm"><div class="wallet-form-row"><label class="wallet-form-field">Titulaire<input required name="holder" autocomplete="cc-name" placeholder="Nom inscrit sur la carte"></label><label class="wallet-form-field">Numéro de carte<input required name="number" inputmode="numeric" autocomplete="cc-number" maxlength="19" placeholder="•••• •••• •••• ••••"></label></div><div class="wallet-form-row"><label class="wallet-form-field">Date d’expiration<input required name="expiry" inputmode="numeric" autocomplete="cc-exp" placeholder="MM/AA"></label><label class="wallet-form-field">CVC<input required name="cvc" inputmode="numeric" autocomplete="cc-csc" maxlength="4" placeholder="•••"></label></div><div class="wallet-form-row"><label class="wallet-form-field">Pays de facturation<select required name="country"><option>RDC</option><option>France</option><option>États-Unis</option><option>Royaume-Uni</option><option>Autre</option></select></label><label class="wallet-form-field">Adresse de facturation<input name="address" autocomplete="street-address" placeholder="Adresse"></label></div><div class="wallet-flow-note"><strong>Protection</strong><span>Dans l’application réelle, les données de carte devront être traitées par un prestataire de paiement conforme. Think ne doit pas stocker le numéro complet de carte ni le CVC en clair.</span></div><div class="wallet-action-row"><button class="wallet-primary-btn" type="submit">Enregistrer la carte</button></div></form>`],
-        mobile:["13 agences","Choisis une agence pour gérer ton moyen de paiement.",`<div class="wallet-flow-note"><strong>Choisis parmi nos 13 agences.</strong><span>Les mêmes noms et logos que dans Transactions.</span></div>${agencyGrid(true)}`],
+        mobile:["Mes numéros Mobile Money","Enregistre plusieurs numéros personnels pour les dépôts et retraits Think.","<div class=\"wallet-flow-note\"><strong>Protection des numéros</strong><span>Les numéros enregistrés sont chiffrés dans la base de données. L’interface ne montre que les quatre derniers chiffres.</span></div><form id=\"walletMobileMoneyForm\" class=\"wallet-form\"><div class=\"wallet-form-row\"><label class=\"wallet-form-field\">Opérateur<select name=\"operator\" required><option value=\"AIRTEL_CD\">Airtel Money</option><option value=\"OM_CD\">Orange Money</option><option value=\"MPESA_CD\">M-Pesa</option></select></label><label class=\"wallet-form-field\">Numéro RDC<input name=\"phone\" type=\"tel\" inputmode=\"tel\" autocomplete=\"tel\" required placeholder=\"+243… ou 09…\"></label></div><div class=\"wallet-form-row\"><label class=\"wallet-form-field\">Nom du numéro<input name=\"label\" maxlength=\"60\" placeholder=\"Ex. Mon Airtel personnel\"></label><label class=\"wallet-form-field\">Numéro principal<select name=\"is_default\"><option value=\"false\">Non</option><option value=\"true\">Oui</option></select></label></div><div class=\"wallet-action-row\"><button class=\"wallet-primary-btn\" type=\"submit\">Enregistrer ce numéro</button></div></form><div id=\"walletMobileMoneyResult\" class=\"wallet-flow-note\" aria-live=\"polite\"></div><div class=\"wallet-detail-box\"><strong>Mes numéros enregistrés</strong><div id=\"walletMobileMoneyList\"><p>Chargement…</p></div></div>"],
         manage:["Gérer mes moyens","Choisis une action de gestion.",`<div class="wallet-action-row"><button class="wallet-secondary-btn" data-wallet-submit="Moyen principal">Définir comme principal</button><button class="wallet-secondary-btn" data-wallet-submit="Moyen retiré">Retirer un moyen</button></div>`],
         local:["Monnaie locale","La devise du pays sélectionné est utilisée pour l’affichage.",`<div class="wallet-detail-box"><strong>Devise locale</strong><p>Retourne dans « Monnaie & pays » pour choisir le pays.</p></div>`],
         adapt:["Adaptation automatique","Prépare l’affichage lors d’un changement de pays.",`<div class="wallet-action-row"><button class="wallet-primary-btn" data-wallet-submit="Adaptation activée">Activer</button></div>`],
@@ -5849,10 +5850,34 @@ function initWalletInterface(){
       };
       const t=panels[action]||["Portefeuille","Option sélectionnée.",`<div class="wallet-detail-box"><strong>Action</strong><p>Cette fonction est prête à être reliée au service officiel correspondant.</p></div>`];
       detail.innerHTML=`<div class="wallet-detail-head"><div><div class="wallet-detail-title">${t[0]}</div><div class="wallet-detail-sub">${t[1]}</div></div></div>${t[2]}`;
+      const savedMobileAccounts=window.THINK_SERVER_STATE?.mobileMoneyAccounts?.items||[];
+      const mobileOperatorName={AIRTEL_CD:"Airtel Money",OM_CD:"Orange Money",MPESA_CD:"M-Pesa"};
+      const accountOptionHtml=savedMobileAccounts.map(a=>'<option value="'+a.id+'" data-operator="'+txEscapeHtml(a.operator)+'" '+(a.is_default?'selected':'')+'>'+txEscapeHtml(mobileOperatorName[a.operator]||a.operator)+' · '+txEscapeHtml(a.label)+' · '+txEscapeHtml(a.phone_masked)+'</option>').join("");
+      const withdrawSelect=$("#walletWithdrawAccounts");
+      if(withdrawSelect) withdrawSelect.innerHTML='<option value="">Choisir un numéro enregistré</option>'+accountOptionHtml;
+      const payinSelect=$("#walletPayinMobileAccount");
+      if(payinSelect) payinSelect.innerHTML='<option value="">Saisir le numéro sur le guichet CinetPay</option>'+accountOptionHtml;
+      const payoutReady=window.THINK_SERVER_STATE?.cinetpay?.payout_sandbox_enabled===true;
+      const payoutAvailability=$("#walletPayoutAvailability");
+      if(payoutAvailability) payoutAvailability.textContent=payoutReady?"PayOut Sandbox activé. Les transferts sont simulés et ne déplacent aucun fonds réels.":"PayOut Sandbox indisponible : configure les clés de test et CINETPAY_PAYOUT_SANDBOX_ENABLED=true.";
+      const payoutSubmit=$("#walletPayoutSubmit");
+      if(payoutSubmit){payoutSubmit.disabled=!(payoutReady&&savedMobileAccounts.length);payoutSubmit.textContent=payoutReady?"Lancer le retrait Sandbox":"PayOut Sandbox indisponible";}
+      const mobileList=$("#walletMobileMoneyList");
+      if(mobileList) mobileList.innerHTML=savedMobileAccounts.length?savedMobileAccounts.map(a=>'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)"><div><strong>'+txEscapeHtml(mobileOperatorName[a.operator]||a.operator)+' · '+txEscapeHtml(a.label)+'</strong><div class="wallet-meta">'+txEscapeHtml(a.phone_masked)+(a.is_default?' · Principal':'')+'</div></div><div style="display:flex;gap:6px;flex-wrap:wrap">'+(a.is_default?'':'<button type="button" class="wallet-secondary-btn" data-mobile-default="'+a.id+'">Principal</button>')+'<button type="button" class="wallet-secondary-btn" data-mobile-delete="'+a.id+'">Supprimer</button></div></div>').join(""):"<p>Aucun numéro enregistré. Ajoute ton premier numéro ci-dessus.</p>";
+      const payoutHistory=$("#walletWithdrawHistory");
+      const withdrawalItems=window.THINK_SERVER_STATE?.withdrawals?.items||[];
+      if(payoutHistory) payoutHistory.innerHTML=withdrawalItems.length?withdrawalItems.slice(0,10).map(w=>'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)"><div><strong>'+txEscapeHtml(w.amount)+' '+txEscapeHtml(w.currency)+'</strong><div class="wallet-meta">'+txEscapeHtml(w.operator)+' · '+txEscapeHtml(w.phone)+' · '+txEscapeHtml(w.status_label||w.status)+'</div>'+(w.provider_transaction_id?'<div class="wallet-meta">Réf. CinetPay : '+txEscapeHtml(w.provider_transaction_id)+'</div>':'')+'</div><div>'+(["payout_success","payout_failed"].includes(w.status)?"":'<button type="button" class="wallet-secondary-btn" data-refresh-withdrawal="'+txEscapeHtml(w.public_id)+'">Vérifier</button>')+'</div></div>').join(""):"<p>Aucun retrait pour le moment.</p>";
+
       const bankForm=$("#walletBankForm");
       if(bankForm) bankForm.addEventListener("submit",event=>{event.preventDefault(); const data=Object.fromEntries(new FormData(bankForm).entries()); localStorage.setItem("think-bank-account",JSON.stringify({bank:data.bank,country:data.country,type:data.type,currency:data.currency,holder:data.holder,accountLast4:String(data.account).slice(-4),swift:data.swift||""})); showToast("Compte bancaire enregistré dans Think. La connexion bancaire réelle devra être autorisée.");});
       const cinetpayForm=$("#walletCinetPayForm");
       if(cinetpayForm) {
+        const savedNumberSelect=$("#walletPayinMobileAccount");
+        const payinNetworkSelect=cinetpayForm.querySelector('select[name="payment_method"]');
+        if(savedNumberSelect&&payinNetworkSelect) savedNumberSelect.addEventListener("change",()=>{
+          const selected=savedNumberSelect.selectedOptions[0];
+          if(selected?.dataset?.operator) payinNetworkSelect.value=selected.dataset.operator;
+        });
         const cinetpayIdempotencyKey="payin-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
         cinetpayForm.addEventListener("submit",async event=>{
           event.preventDefault();
@@ -5873,7 +5898,8 @@ function initWalletInterface(){
                 amount:String(amount),
                 currency:"CDF",
                 description:"Depot portefeuille Think",
-                payment_method:values.payment_method||null
+                payment_method:values.payment_method||null,
+                mobile_money_account_id:values.mobile_money_account_id?Number(values.mobile_money_account_id):null
               })
             });
             if(!result.payment_url) throw new Error("CinetPay n'a pas retourné de lien de paiement.");
@@ -5914,40 +5940,63 @@ function initWalletInterface(){
         if(route==='transactions'){ showContent("Transactions","Transferts et services financiers",getPageContent("Transactions")); return; }
         if(route==='ecommerce'){ showContent("E-commerce","Recherche des produits et compare les offres avant ton achat.",getPageContent("E-commerce")); }
       }));
-      $$('.wallet-agency').forEach(b=>b.addEventListener('click',()=>{
-        $$('.wallet-agency').forEach(x=>x.classList.remove('active'));
-        b.classList.add('active');
-        const name=b.dataset.agency;
-        const slug=b.dataset.agencySlug;
-        const hint=$("#walletWithdrawHint");
-        if(hint){
-          hint.innerHTML=`<strong>${name}</strong> sélectionné.<br><span style="color:var(--muted)">Demande de retrait Sandbox : renseigne le numéro destinataire et le montant. Aucun transfert réel ne sera envoyé.</span><div class="wallet-form-row" style="margin-top:10px"><label class="wallet-form-field">Numéro destinataire<input id="walletWithdrawPhone" type="tel" inputmode="tel" maxlength="40" placeholder="+243…"></label><label class="wallet-form-field">Montant<input id="walletWithdrawAmount" type="number" min="1" step="0.01" placeholder="0,00"></label><label class="wallet-form-field">Devise<select id="walletWithdrawCurrency"><option>USD</option><option>EUR</option><option>CDF</option></select></label></div><div class="wallet-action-row" style="margin-top:10px"><button class="wallet-primary-btn" type="button" id="walletPrepareWithdraw">Enregistrer la demande Sandbox</button></div><div id="walletWithdrawResult" class="wallet-flow-note" style="margin-top:10px" aria-live="polite"></div>`;
-          const next=$("#walletPrepareWithdraw");
-          if(next) next.addEventListener('click',async()=>{
-            const amount=$("#walletWithdrawAmount")?.value;
-            const phone=$("#walletWithdrawPhone")?.value.trim();
-            const currency=$("#walletWithdrawCurrency")?.value||"CDF";
-            if(!amount || Number(amount)<1){ showToast("Le montant minimum est de 1 unité."); return; }
-            if(!phone || phone.length<6){ showToast("Entre un numéro destinataire valide."); return; }
-            next.disabled=true; next.textContent="Enregistrement…";
-            try{
-              const result=await window.thinkApiRequest("/api/withdrawals",{
-                method:"POST",
-                body:JSON.stringify({amount,currency,operator:slug,phone})
-              });
-              await window.thinkApiHydrate();
-              const target=$("#walletWithdrawResult");
-              if(target) target.innerHTML=`<strong>Demande enregistrée · ${result.withdrawal.public_id}</strong><span>Statut : en attente Sandbox. ${result.withdrawal.amount} ${currency} sont réservés. Aucun paiement Mobile Money réel n'a été envoyé.</span>`;
-              showToast("Demande de retrait enregistrée en Sandbox.");
-              updateWalletCurrencyUI();
-            }catch(error){
-              showToast(error.message||"Impossible d'enregistrer le retrait.");
-              next.disabled=false; next.textContent="Réessayer";
-            }
-          });
-        } else {
-          showToast(`${name} sélectionné.`);
+
+      const mobileMoneyForm=$("#walletMobileMoneyForm");
+      if(mobileMoneyForm) mobileMoneyForm.addEventListener("submit",async event=>{
+        event.preventDefault();
+        const button=mobileMoneyForm.querySelector('button[type="submit"]');
+        const values=Object.fromEntries(new FormData(mobileMoneyForm).entries());
+        button.disabled=true; button.textContent="Enregistrement sécurisé…";
+        try{
+          await window.thinkApiRequest("/api/mobile-money/accounts",{method:"POST",body:JSON.stringify({operator:values.operator,phone:values.phone,label:values.label||"Mon numéro",is_default:values.is_default==="true"})});
+          await window.thinkApiHydrate();
+          showToast("Numéro Mobile Money enregistré et chiffré.");
+          walletDetailAction("mobile");
+        }catch(error){showToast(error.message||"Impossible d'enregistrer ce numéro.");button.disabled=false;button.textContent="Réessayer";}
+      });
+      $$("[data-mobile-default]").forEach(button=>button.addEventListener("click",async()=>{
+        button.disabled=true;
+        try{
+          await window.thinkApiRequest("/api/mobile-money/accounts/"+button.dataset.mobileDefault+"/default",{method:"POST"});
+          await window.thinkApiHydrate(); walletDetailAction("mobile"); showToast("Numéro principal modifié.");
+        }catch(error){showToast(error.message||"Impossible de modifier le numéro principal.");button.disabled=false;}
+      }));
+      $$("[data-mobile-delete]").forEach(button=>button.addEventListener("click",async()=>{
+        if(!confirm("Supprimer ce numéro enregistré ? Les retraits déjà créés conservent leur historique.")) return;
+        button.disabled=true;
+        try{
+          await window.thinkApiRequest("/api/mobile-money/accounts/"+button.dataset.mobileDelete,{method:"DELETE"});
+          await window.thinkApiHydrate(); walletDetailAction("mobile"); showToast("Numéro supprimé.");
+        }catch(error){showToast(error.message||"Impossible de supprimer ce numéro.");button.disabled=false;}
+      }));
+      const payoutForm=$("#walletWithdrawForm");
+      if(payoutForm) payoutForm.addEventListener("submit",async event=>{
+        event.preventDefault();
+        const button=payoutForm.querySelector('button[type="submit"]');
+        const values=Object.fromEntries(new FormData(payoutForm).entries());
+        const amount=Number(values.amount);
+        if(!values.mobile_money_account_id){showToast("Choisis un numéro Mobile Money enregistré.");return;}
+        if(!Number.isInteger(amount)||amount<100||amount>1500000){showToast("Le montant doit être un nombre entier entre 100 et 1 500 000 CDF.");return;}
+        const key="wdr-"+(window.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
+        button.disabled=true; button.textContent="Connexion à CinetPay…";
+        try{
+          const result=await window.thinkApiRequest("/api/withdrawals",{method:"POST",headers:{"Idempotency-Key":key},body:JSON.stringify({amount:String(amount),currency:"CDF",mobile_money_account_id:Number(values.mobile_money_account_id)})});
+          await window.thinkApiHydrate();
+          const target=$("#walletPayoutResult");
+          if(target){const status=result.withdrawal?.status_label||result.withdrawal?.status||"En cours";target.innerHTML="<strong>"+txEscapeHtml(result.withdrawal?.public_id||"Demande créée")+" · "+txEscapeHtml(status)+"</strong><span>"+(result.withdrawal?.status==="payout_success"?"Statut confirmé par CinetPay Sandbox. Aucun argent réel n'a été transféré.":"Le montant reste réservé jusqu'à confirmation définitive. Aucun fonds réel n'est transféré en Sandbox.")+"</span>";}
+          updateWalletCurrencyUI(); showToast("Demande PayOut Sandbox envoyée."); walletDetailAction("withdraw");
+        }catch(error){
+          showToast(error.message||"Le résultat doit être vérifié dans l'historique.");
+          button.disabled=false; button.textContent="Réessayer";
+          try{await window.thinkApiHydrate(); walletDetailAction("withdraw");}catch(_){}
         }
+      });
+      $("[data-refresh-withdrawal]").forEach(button=>button.addEventListener("click",async()=>{
+        button.disabled=true; button.textContent="Vérification…";
+        try{
+          await window.thinkApiRequest("/api/withdrawals/"+encodeURIComponent(button.dataset.refreshWithdrawal)+"/refresh",{method:"POST"});
+          await window.thinkApiHydrate(); walletDetailAction("withdraw"); showToast("Statut CinetPay actualisé.");
+        }catch(error){showToast(error.message||"Le statut reste à vérifier.");button.disabled=false;button.textContent="Réessayer";}
       }));
     }
     $$('[data-wallet-section]').forEach(btn=>btn.addEventListener('click',()=>render(btn.dataset.walletSection)));

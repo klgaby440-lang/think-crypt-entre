@@ -8,3 +8,4 @@ pwdlib[argon2]
 pydantic-settings
 python-dotenv
 cinetpay-python==0.1.0
+cryptography>=42.0.0
