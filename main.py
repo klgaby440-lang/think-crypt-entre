@@ -1798,20 +1798,20 @@ def _require_cinetpay():
 
 
 
-def _cinetpay_error_log_fields(exc: Exception) -> tuple[str, str, str]:
+def _cinetpay_error_log_fields(exc: Exception) -> tuple[str, str, str, str]:
     """Return safe provider error fields without logging credentials or full payloads."""
     error_type = type(exc).__name__
     api_code = getattr(exc, "api_code", "")
     api_status = str(getattr(exc, "api_status", "") or "")[:80]
     description = str(getattr(exc, "description", "") or "")
-    description = re.sub(r"\\s+", " ", description).strip()
+    description = re.sub(r"\s+", " ", description).strip()
     description = re.sub(
-        r"(?i)\\bsk_(?:test|live)_[A-Za-z0-9_-]+\\b",
+        r"(?i)\bsk_(?:test|live)_[A-Za-z0-9_-]+\b",
         "[REDACTED]",
         description,
     )
     description = re.sub(
-        r"(?i)\\bBearer\\s+[^\\s,;]+",
+        r"(?i)\bBearer\s+[^\s,;]+",
         "Bearer [REDACTED]",
         description,
     )
