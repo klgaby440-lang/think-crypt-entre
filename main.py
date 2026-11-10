@@ -1810,6 +1810,7 @@ def get_llink_subscription_internal(
         .filter(
             LlinkSubscription.user_id == user.id,
             LlinkSubscription.status == "active",
+            LlinkSubscription.starts_at <= now,
             LlinkSubscription.expires_at > now,
         )
         .order_by(LlinkSubscription.expires_at.desc(), LlinkSubscription.created_at.desc())
