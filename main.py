@@ -1872,12 +1872,18 @@ def refresh_llink_subscription_payment_internal(
     if subscription is None:
         raise HTTPException(status_code=409, detail="Abonnement associé à cette transaction introuvable.")
     now = datetime.now(timezone.utc)
+    starts_at = subscription.starts_at
+    expires_at = subscription.expires_at
+    if starts_at is not None and starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     active = (
         subscription.status == "active"
-        and subscription.starts_at is not None
-        and subscription.starts_at <= now
-        and subscription.expires_at is not None
-        and subscription.expires_at > now
+        and starts_at is not None
+        and starts_at <= now
+        and expires_at is not None
+        and expires_at > now
     )
     return {
         "ok": True,
