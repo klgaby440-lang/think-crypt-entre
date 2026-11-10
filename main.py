@@ -304,10 +304,12 @@ class LlinkSubscription(Base):
     __tablename__ = "llink_subscriptions"
     __table_args__ = (
         UniqueConstraint("payment_transaction_id", name="uq_llink_subscription_payment"),
+        UniqueConstraint("user_id", "checkout_id", name="uq_llink_subscription_user_checkout"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    checkout_id = Column(String(128), nullable=False)
     plan = Column(String(24), nullable=False)
     status = Column(String(24), nullable=False, default="pending_payment", index=True)
     amount = Column(Numeric(20, 2), nullable=False)
@@ -1886,6 +1888,29 @@ def create_llink_subscription_checkout_internal(
     expected_key = f"llink-{user.id}-{checkout_id}"
     if idempotency_key and idempotency_key.strip() != expected_key:
         raise HTTPException(status_code=409, detail="Clé d'idempotence Llink incohérente.")
+    sub = db.query(LlinkSubscription).filter(
+        LlinkSubscription.user_id == user.id,
+        LlinkSubscription.checkout_id == expected_key,
+    ).with_for_update().first()
+    if sub is None:
+        sub = LlinkSubscription(
+            user_id=user.id,
+            checkout_id=expected_key,
+            plan=plan,
+            status="pending_payment",
+            amount=prices[plan],
+            currency="CDF",
+        )
+        db.add(sub)
+        db.commit()
+        db.refresh(sub)
+    elif (
+        sub.plan != plan
+        or Decimal(sub.amount) != prices[plan]
+        or sub.status not in {"pending_payment", "active"}
+    ):
+        raise HTTPException(status_code=409, detail="Cette clé de checkout est déjà utilisée pour une autre demande.")
+
     payment_data = PaymentData(
         purpose="llink_subscription",
         amount=prices[plan],
@@ -1906,20 +1931,12 @@ def create_llink_subscription_checkout_internal(
     ).first()
     if payment_row is None:
         raise HTTPException(status_code=500, detail="La transaction Think créée est introuvable.")
-    sub = db.query(LlinkSubscription).filter(
-        LlinkSubscription.payment_transaction_id == payment_row.id
-    ).first()
-    if sub is None:
-        sub = LlinkSubscription(
-            user_id=user.id,
-            plan=plan,
-            status="pending_payment",
-            amount=prices[plan],
-            currency="CDF",
-            payment_transaction_id=payment_row.id,
-        )
-        db.add(sub)
+    if sub.payment_transaction_id not in {None, payment_row.id}:
+        raise HTTPException(status_code=409, detail="Cette demande Llink est déjà liée à une autre transaction.")
+    if sub.payment_transaction_id is None:
+        sub.payment_transaction_id = payment_row.id
         db.commit()
+        db.refresh(sub)
     return {
         "ok": True,
         "product": "llink",
@@ -2633,6 +2650,28 @@ def create_payment(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    if data.purpose == "llink_subscription":
+        llink_subscription = (
+            db.query(LlinkSubscription)
+            .filter(
+                LlinkSubscription.user_id == user.id,
+                LlinkSubscription.checkout_id == idempotency_key,
+                LlinkSubscription.status == "pending_payment",
+            )
+            .with_for_update()
+            .first()
+        )
+        if llink_subscription is None:
+            row.status = "initialization_failed"
+            row.provider_response = {
+                "environment": provider_config["mode"],
+                "error_type": "missing_internal_llink_subscription",
+            }
+            db.commit()
+            raise HTTPException(status_code=403, detail="Checkout abonnement Llink non autorisé.")
+        llink_subscription.payment_transaction_id = row.id
+        db.commit()
 
     profile = user.profile
     first_name = (profile.first_name if profile else "") or ""
