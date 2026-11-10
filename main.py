@@ -1842,6 +1842,56 @@ def get_llink_subscription_internal(
     }
 
 
+@app.post("/api/internal/llink/users/{think_user_id}/payments/{public_id}/refresh")
+def refresh_llink_subscription_payment_internal(
+    think_user_id: int,
+    public_id: str,
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    """Vérifie directement auprès de CinetPay le paiement Llink de ce compte Think."""
+    user = db.query(ThinkUser).filter(
+        ThinkUser.id == think_user_id,
+        ThinkUser.is_active.is_(True),
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    payment = db.query(PaymentTransaction).filter(
+        PaymentTransaction.public_id == public_id,
+        PaymentTransaction.user_id == user.id,
+        PaymentTransaction.purpose == "llink_subscription",
+    ).first()
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Paiement Llink introuvable pour ce compte Think.")
+    if payment.status not in {"accepted", "failed"}:
+        payment = _fetch_and_sync_cinetpay_payment(db, payment)
+    subscription = db.query(LlinkSubscription).filter(
+        LlinkSubscription.payment_transaction_id == payment.id,
+        LlinkSubscription.user_id == user.id,
+    ).first()
+    if subscription is None:
+        raise HTTPException(status_code=409, detail="Abonnement associé à cette transaction introuvable.")
+    now = datetime.now(timezone.utc)
+    active = (
+        subscription.status == "active"
+        and subscription.starts_at is not None
+        and subscription.starts_at <= now
+        and subscription.expires_at is not None
+        and subscription.expires_at > now
+    )
+    return {
+        "ok": True,
+        "public_id": payment.public_id,
+        "payment_status": payment.status,
+        "subscription": {
+            "plan": subscription.plan,
+            "status": subscription.status,
+            "is_active": active,
+            "expires_at": subscription.expires_at.isoformat() if subscription.expires_at else None,
+            "level": {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}.get(subscription.plan, "velora"),
+        },
+    }
+
 @app.get("/api/internal/llink/users/{think_user_id}/mobile-money-accounts")
 def list_llink_mobile_money_accounts_internal(
     think_user_id: int,
