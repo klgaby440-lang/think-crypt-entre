@@ -548,6 +548,7 @@ class LlinkCheckoutData(BaseModel):
     plan: str = Field(min_length=5, max_length=16)
     payment_method: str = Field(min_length=3, max_length=24)
     checkout_id: str = Field(min_length=8, max_length=64)
+    mobile_money_account_id: int | None = Field(default=None, gt=0)
 
 
 class SandboxCreditData(BaseModel):
@@ -663,6 +664,22 @@ def _llink_plan_prices_cdf() -> dict[str, Decimal]:
             )
         prices[plan] = amount
     return prices
+
+
+@app.get("/api/llink/plans")
+def list_llink_plans():
+    prices = _llink_plan_prices_cdf()
+    levels = {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}
+    return {
+        "product": "llink",
+        "currency": "CDF",
+        "period_days": 365,
+        "items": [
+            {"plan": plan, "level": levels[plan], "amount": int(amount), "currency": "CDF", "period_days": 365}
+            for plan, amount in prices.items()
+        ],
+    }
+
 
 
 def issue_access_token(user: ThinkUser) -> str:
@@ -1822,6 +1839,25 @@ def get_llink_subscription_internal(
     }
 
 
+@app.get("/api/internal/llink/users/{think_user_id}/mobile-money-accounts")
+def list_llink_mobile_money_accounts_internal(
+    think_user_id: int,
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(ThinkUser).filter(ThinkUser.id == think_user_id, ThinkUser.is_active.is_(True)).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    rows = (
+        db.query(MobileMoneyAccount)
+        .filter(MobileMoneyAccount.user_id == user.id, MobileMoneyAccount.is_active.is_(True))
+        .order_by(MobileMoneyAccount.is_default.desc(), MobileMoneyAccount.created_at.desc())
+        .all()
+    )
+    return {"items": [_serialize_mobile_money_account(row) for row in rows]}
+
+
+
 @app.post("/api/internal/llink/subscriptions/checkout")
 def create_llink_subscription_checkout_internal(
     data: LlinkCheckoutData,
@@ -1855,6 +1891,7 @@ def create_llink_subscription_checkout_internal(
         currency="CDF",
         description=f"Abonnement Llink {plan.title()}",
         payment_method=payment_method,
+        mobile_money_account_id=data.mobile_money_account_id,
     )
     result = create_payment(
         payment_data,
@@ -2081,6 +2118,15 @@ def _payment_return_url(public_id: str, result: str) -> str:
     if parsed.scheme != "https" or not parsed.netloc:
         raise HTTPException(status_code=503, detail="THINK_PUBLIC_BASE_URL doit être une URL HTTPS publique.")
     return f"{base}/api/cinetpay/payin/return?payment={public_id}&result={result}"
+
+
+def _llink_payment_return_url(public_id: str, result: str) -> str:
+    base = os.getenv("LLINK_PUBLIC_BASE_URL", "https://ll-one-self.vercel.app").strip().rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(status_code=503, detail="LLINK_PUBLIC_BASE_URL doit être une URL HTTPS publique valide.")
+    return f"{base}/?llink_payment={public_id}&llink_result={result}"
+
 
 
 def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
@@ -2626,8 +2672,9 @@ def create_payment(
     try:
         from cinetpay import PaymentRequest
 
-        success_url = _payment_return_url(public_id, "success")
-        failed_url = _payment_return_url(public_id, "failed")
+        return_url = _llink_payment_return_url if data.purpose == "llink_subscription" else _payment_return_url
+        success_url = return_url(public_id, "success")
+        failed_url = return_url(public_id, "failed")
         request_data = PaymentRequest(
             currency=currency,
             merchant_transaction_id=merchant_transaction_id,
