@@ -227,6 +227,7 @@ jobs:
           assert transfer.json()["transfer"]["status"] == "sandbox_pending"
           assert transfer.json()["no_real_money_sent"] is True
 
+          # Africell can be saved for PayIn, but it remains excluded from PayOut.
           # Save more than one Mobile Money number; the API returns masked values only.
           airtel_account = client.post("/api/mobile-money/accounts", headers=headers, json={
               "operator": "AIRTEL_CD",
