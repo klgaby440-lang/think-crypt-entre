@@ -2689,6 +2689,27 @@ def create_payment(
             detail="La première initialisation doit être vérifiée avant de créer une nouvelle demande. Utilise une nouvelle clé uniquement après rapprochement.",
         )
 
+    llink_subscription = None
+    if data.purpose == "llink_subscription":
+        llink_subscription = (
+            db.query(LlinkSubscription)
+            .filter(
+                LlinkSubscription.user_id == user.id,
+                LlinkSubscription.checkout_id == idempotency_key,
+                LlinkSubscription.status == "pending_payment",
+            )
+            .with_for_update()
+            .first()
+        )
+        if llink_subscription is None:
+            raise HTTPException(status_code=403, detail="Checkout abonnement Llink non autorisé.")
+        if (
+            llink_subscription.payment_transaction_id is not None
+            or Decimal(llink_subscription.amount) != amount_decimal
+            or llink_subscription.currency != currency
+        ):
+            raise HTTPException(status_code=409, detail="La demande d'abonnement Llink ne correspond pas au paiement.")
+
     public_id = "PAY-" + uuid4().hex[:16].upper()
     merchant_transaction_id = "THK" + uuid4().hex[:24].upper()
     row = PaymentTransaction(
@@ -2704,30 +2725,11 @@ def create_payment(
         provider_response={"environment": provider_config["mode"]},
     )
     db.add(row)
+    db.flush()
+    if llink_subscription is not None:
+        llink_subscription.payment_transaction_id = row.id
     db.commit()
     db.refresh(row)
-
-    if data.purpose == "llink_subscription":
-        llink_subscription = (
-            db.query(LlinkSubscription)
-            .filter(
-                LlinkSubscription.user_id == user.id,
-                LlinkSubscription.checkout_id == idempotency_key,
-                LlinkSubscription.status == "pending_payment",
-            )
-            .with_for_update()
-            .first()
-        )
-        if llink_subscription is None:
-            row.status = "initialization_failed"
-            row.provider_response = {
-                "environment": provider_config["mode"],
-                "error_type": "missing_internal_llink_subscription",
-            }
-            db.commit()
-            raise HTTPException(status_code=403, detail="Checkout abonnement Llink non autorisé.")
-        llink_subscription.payment_transaction_id = row.id
-        db.commit()
 
     profile = user.profile
     first_name = (profile.first_name if profile else "") or ""
