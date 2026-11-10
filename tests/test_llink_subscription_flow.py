@@ -234,3 +234,59 @@ def test_second_llink_subscription_starts_after_previous_expiry(db_session):
     db_session.refresh(sub)
 
     assert sub.starts_at.replace(tzinfo=timezone.utc) == previous_end.replace(tzinfo=timezone.utc)
+
+
+def test_internal_refresh_is_scoped_to_the_think_user_and_subscription(db_session):
+    user = _user(db_session)
+    payment = main.PaymentTransaction(
+        public_id="PAY-" + uuid4().hex[:16].upper(),
+        user_id=user.id,
+        purpose="llink_subscription",
+        amount=Decimal("500"),
+        currency="CDF",
+        provider="cinetpay_v1",
+        merchant_transaction_id="THK" + uuid4().hex[:24].upper(),
+        provider_transaction_id="provider-llink-refresh",
+        idempotency_key="llink-" + str(user.id) + "-" + uuid4().hex[:16],
+        status="accepted",
+        payment_url="https://checkout.example.test/pay",
+        provider_response={"environment": "sandbox"},
+    )
+    db_session.add(payment)
+    db_session.commit()
+    db_session.refresh(payment)
+    now = datetime.now(timezone.utc)
+    sub = main.LlinkSubscription(
+        user_id=user.id,
+        checkout_id=payment.idempotency_key,
+        plan="gold",
+        status="active",
+        amount=Decimal("3000"),
+        currency="CDF",
+        payment_transaction_id=payment.id,
+        starts_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(days=365),
+    )
+    db_session.add(sub)
+    db_session.commit()
+
+    result = main.refresh_llink_subscription_payment_internal(
+        think_user_id=user.id,
+        public_id=payment.public_id,
+        _service=None,
+        db=db_session,
+    )
+    assert result["payment_status"] == "accepted"
+    assert result["subscription"]["is_active"] is True
+    assert result["subscription"]["plan"] == "gold"
+
+    another_user = _user(db_session)
+    with pytest.raises(HTTPException) as error:
+        main.refresh_llink_subscription_payment_internal(
+            think_user_id=another_user.id,
+            public_id=payment.public_id,
+            _service=None,
+            db=db_session,
+        )
+    assert error.value.status_code == 404
+
