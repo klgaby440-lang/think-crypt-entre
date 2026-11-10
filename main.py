@@ -1099,8 +1099,8 @@ def add_mobile_money_account(
     user: ThinkUser = Depends(get_current_user),
 ):
     operator = data.operator.strip().upper()
-    if operator not in PAYOUT_OPERATORS_CD:
-        raise HTTPException(status_code=422, detail="Opérateur Mobile Money non pris en charge pour les retraits RDC.")
+    if operator not in PAYIN_OPERATORS_CD:
+        raise HTTPException(status_code=422, detail="Opérateur Mobile Money non pris en charge pour les paiements entrants RDC.")
     phone = _normalize_drc_phone(data.phone)
     ciphertext = _encrypt_mobile_phone(phone)
     rows = db.query(MobileMoneyAccount).filter(
@@ -2212,6 +2212,7 @@ def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
         raise HTTPException(status_code=502, detail="CinetPay a retourné une URL de paiement inattendue.")
 
 
+PAYIN_OPERATORS_CD = {"AIRTEL_CD", "OM_CD", "MPESA_CD", "AFRICELL_CD"}
 PAYOUT_OPERATORS_CD = {"AIRTEL_CD", "OM_CD", "MPESA_CD"}
 PAYOUT_MIN_CDF = 100
 PAYOUT_MAX_CDF = 1_500_000  # Limit imposed by the installed CinetPay Python SDK; confirm merchant-specific cap.
@@ -2270,7 +2271,7 @@ def _serialize_mobile_money_account(row: MobileMoneyAccount) -> dict[str, Any]:
     return {
         "id": row.id,
         "operator": row.operator,
-        "operator_label": {"AIRTEL_CD": "Airtel Money", "OM_CD": "Orange Money", "MPESA_CD": "M-Pesa"}.get(row.operator, row.operator),
+        "operator_label": {"AIRTEL_CD": "Airtel Money", "OM_CD": "Orange Money", "MPESA_CD": "M-Pesa", "AFRICELL_CD": "Africell Money"}.get(row.operator, row.operator),
         "label": row.label,
         "phone_masked": row.phone_masked,
         "is_default": row.is_default,
