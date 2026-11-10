@@ -486,7 +486,7 @@ jobs:
               assert payin_json["payment_url"] == fake_payment_response.payment_url
               assert "notify_token" not in payin.text
               assert fake_payment_api.initialize.call_count == 1
-              assert fake_payment_api.initialize.call_args.args[0].client_phone_number == "+243999000222"
+              assert fake_payment_api.initialize.call_args.args[0].client_phone_number == "+243999000333"
 
               # Same key and payload returns the same checkout without creating another one.
               payin_replay = client.post("/api/payments/create", headers=payin_headers, json=payin_payload)
