@@ -6020,6 +6020,8 @@ function initProfileInterface(){
     const name=[read("firstName"),read("lastName")].filter(Boolean).join(" ")||"Compte Think";
     const dn=$("#profileDisplayName"); if(dn) dn.textContent=name;
     const st=$("#profileStatusText"); if(st) st.textContent=window.THINK_SERVER_STATE?.me?"Compte connecté · données synchronisées avec Think":"Compte non connecté";
+    const cryptId=window.THINK_SERVER_STATE?.me?.crypt_id || read("cryptId") || "Identifiant en cours de chargement";
+    const cryptIdNode=$("#profileCryptId"); if(cryptIdNode) cryptIdNode.textContent=cryptId;
   }
   const field=(label,name,value,type="text",extra="")=>`<label class="profile-field"><span>${label}</span><input type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;
   const select=(label,name,value,options)=>`<label class="profile-field"><span>${label}</span><select name="${name}">${options.map(o=>`<option ${o===value?'selected':''}>${o}</option>`).join("")}</select></label>`;
