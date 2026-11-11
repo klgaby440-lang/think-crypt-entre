@@ -36,6 +36,7 @@ def db_session():
 def _user(db):
     user = main.ThinkUser(
         think_id="THK-" + uuid4().hex[:12].upper(),
+        crypt_id=main._new_crypt_id(),
         email=f"user-{uuid4().hex[:8]}@example.test",
         password_hash="test-hash",
         full_name="Llink Test User",
@@ -52,6 +53,7 @@ def test_llink_sso_ticket_is_short_lived_and_scoped(monkeypatch):
     user = SimpleNamespace(
         id=42,
         think_id="THK-0123456789AB",
+        crypt_id="INK_ABCDEFGHJKLMNPQ",
         email="tester@example.test",
         full_name="Think Tester",
     )
@@ -64,6 +66,8 @@ def test_llink_sso_ticket_is_short_lived_and_scoped(monkeypatch):
         issuer="think-api",
     )
     assert claims["sub"] == "42"
+    assert claims["think_id"] == "THK-0123456789AB"
+    assert claims["crypt_id"] == "INK_ABCDEFGHJKLMNPQ"
     assert claims["scope"] == "llink"
     assert claims["aud"] == "llink-api"
     assert 0 < claims["exp"] - claims["iat"] <= 120
