@@ -234,6 +234,7 @@ def test_failed_cinetpay_credit_purchase_is_never_marked_paid(db_session):
         user_id=user.id, purpose="llink_credits",
         amount=Decimal("2800"), currency="CDF", provider="cinetpay_v1",
         merchant_transaction_id="THK" + uuid4().hex[:24].upper(),
+        provider_transaction_id="provider-llink-credit-failed",
         idempotency_key="llink-credit-" + str(user.id) + "-" + uuid4().hex[:12],
         status="pending", payment_url="https://checkout.example.test/pay",
         provider_response={"environment": "sandbox"},
@@ -251,7 +252,7 @@ def test_failed_cinetpay_credit_purchase_is_never_marked_paid(db_session):
     db_session.commit()
     provider_status = SimpleNamespace(
         merchant_transaction_id=payment.merchant_transaction_id,
-        transaction_id=None, status="FAILED", amount="2800", currency="CDF",
+        transaction_id="provider-llink-credit-failed", status="FAILED", amount="2800", currency="CDF",
     )
 
     main._sync_cinetpay_payment_status(db_session, payment, provider_status)
