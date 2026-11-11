@@ -78,6 +78,7 @@ def test_llink_sso_refuses_weak_secret(monkeypatch):
     user = SimpleNamespace(
         id=42,
         think_id="THK-0123456789AB",
+        crypt_id="INK_ABCDEFGHJKLMNPQ",
         email="tester@example.test",
         full_name="Think Tester",
     )
