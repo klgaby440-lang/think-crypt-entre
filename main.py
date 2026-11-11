@@ -1053,10 +1053,10 @@ def crypt_console_internal_users(
     limit = max(1, min(int(limit or 50), 100))
     pattern = "%" + term.replace("%", "\\%").replace("_", "\\_") + "%"
     rows = db.query(ThinkUser).filter(or_(
-        ThinkUser.crypt_id.ilike(pattern),
-        ThinkUser.think_id.ilike(pattern),
-        ThinkUser.email.ilike(pattern),
-        ThinkUser.full_name.ilike(pattern),
+        ThinkUser.crypt_id.ilike(pattern, escape="\\"),
+        ThinkUser.think_id.ilike(pattern, escape="\\"),
+        ThinkUser.email.ilike(pattern, escape="\\"),
+        ThinkUser.full_name.ilike(pattern, escape="\\"),
     )).order_by(ThinkUser.created_at.desc()).limit(limit).all()
     result = []
     for user in rows:
