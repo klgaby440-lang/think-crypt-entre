@@ -39,6 +39,8 @@ import logging
 import os
 import re
 import hashlib
+import json
+import secrets
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -297,6 +299,29 @@ class Subscription(Base):
     user = relationship("ThinkUser", back_populates="subscriptions")
 
 
+class LlinkSubscription(Base):
+    """Abonnement Llink rattaché à un compte Think et à un paiement CinetPay."""
+    __tablename__ = "llink_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("payment_transaction_id", name="uq_llink_subscription_payment"),
+        UniqueConstraint("user_id", "checkout_id", name="uq_llink_subscription_user_checkout"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    checkout_id = Column(String(128), nullable=False)
+    plan = Column(String(24), nullable=False)
+    status = Column(String(24), nullable=False, default="pending_payment", index=True)
+    amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="CDF")
+    payment_transaction_id = Column(Integer, ForeignKey("payment_transactions.id", ondelete="SET NULL"), nullable=True)
+    starts_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("ThinkUser")
+
+
 class Notification(Base):
     __tablename__ = "notifications"
 
@@ -520,6 +545,14 @@ class PaymentData(BaseModel):
     mobile_money_account_id: int | None = Field(default=None, gt=0)
 
 
+class LlinkCheckoutData(BaseModel):
+    think_user_id: int = Field(gt=0)
+    plan: str = Field(min_length=5, max_length=16)
+    payment_method: str = Field(min_length=3, max_length=24)
+    checkout_id: str = Field(min_length=8, max_length=64)
+    mobile_money_account_id: int | None = Field(default=None, gt=0)
+
+
 class SandboxCreditData(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(min_length=3, max_length=3)
@@ -577,6 +610,78 @@ def _jwt_secret() -> str:
     if len(value) < 32:
         raise HTTPException(status_code=503, detail="JWT_SECRET must be configured in Render (minimum 32 characters).")
     return value
+
+
+def _llink_sso_secret() -> str:
+    value = os.getenv("LLINK_SSO_SECRET", "").strip()
+    if len(value) < 32:
+        raise HTTPException(
+            status_code=503,
+            detail="LLINK_SSO_SECRET doit être configuré sur Think et Llink (minimum 32 caractères).",
+        )
+    return value
+
+
+def _require_llink_service_token(
+    token: str | None = Header(default=None, alias="X-LLINK-SERVICE-TOKEN"),
+) -> None:
+    expected = os.getenv("LLINK_SERVICE_TOKEN", "").strip()
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="LLINK_SERVICE_TOKEN n'est pas configuré.")
+    if not token or not secrets.compare_digest(token.strip(), expected):
+        raise HTTPException(status_code=401, detail="Authentification du service Llink invalide.")
+
+
+def _llink_plan_prices_cdf() -> dict[str, Decimal]:
+    raw = os.getenv("LLINK_PLAN_PRICES_CDF", "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=503,
+            detail="Les tarifs Llink en CDF doivent être configurés dans LLINK_PLAN_PRICES_CDF.",
+        )
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=503, detail="LLINK_PLAN_PRICES_CDF doit être un objet JSON valide.") from None
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=503, detail="LLINK_PLAN_PRICES_CDF doit être un objet JSON.")
+    required = {"bronze", "silver", "gold", "diamant"}
+    if set(values) != required:
+        raise HTTPException(
+            status_code=503,
+            detail="LLINK_PLAN_PRICES_CDF doit définir exactement bronze, silver, gold et diamant.",
+        )
+    prices: dict[str, Decimal] = {}
+    for plan, raw_amount in values.items():
+        if isinstance(raw_amount, bool):
+            raise HTTPException(status_code=503, detail=f"Tarif Llink invalide pour {plan}.")
+        try:
+            amount = Decimal(str(raw_amount))
+        except Exception:
+            raise HTTPException(status_code=503, detail=f"Tarif Llink invalide pour {plan}.") from None
+        if not amount.is_finite() or amount != amount.to_integral_value() or amount < 100 or amount > 2_500_000 or int(amount) % 5:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Le tarif CDF de {plan} doit être un entier, multiple de 5, compris entre 100 et 2 500 000.",
+            )
+        prices[plan] = amount
+    return prices
+
+
+@app.get("/api/llink/plans")
+def list_llink_plans():
+    prices = _llink_plan_prices_cdf()
+    levels = {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}
+    return {
+        "product": "llink",
+        "currency": "CDF",
+        "period_days": 365,
+        "items": [
+            {"plan": plan, "level": levels[plan], "amount": int(amount), "currency": "CDF", "period_days": 365}
+            for plan, amount in prices.items()
+        ],
+    }
+
 
 
 def issue_access_token(user: ThinkUser) -> str:
@@ -824,6 +929,34 @@ def me(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user
     return serialize_user(db, user)
 
 
+@app.post("/api/auth/llink/exchange")
+def exchange_llink_sso(user: ThinkUser = Depends(get_current_user)):
+    """Émet un jeton SSO à durée courte et limité à Llink après authentification Think."""
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "think_id": user.think_id,
+            "email": user.email,
+            "name": user.full_name,
+            "scope": "llink",
+            "iss": "think-api",
+            "aud": "llink-api",
+            "iat": now,
+            "exp": now + timedelta(minutes=2),
+            "jti": uuid4().hex,
+        },
+        _llink_sso_secret(),
+        algorithm="HS256",
+    )
+    return {
+        "sso_token": token,
+        "token_type": "bearer",
+        "expires_in": 120,
+        "user": {"think_id": user.think_id, "email": user.email, "full_name": user.full_name},
+    }
+
+
 @app.patch("/api/profile")
 def update_profile(
     data: ProfilePatch,
@@ -966,8 +1099,8 @@ def add_mobile_money_account(
     user: ThinkUser = Depends(get_current_user),
 ):
     operator = data.operator.strip().upper()
-    if operator not in PAYOUT_OPERATORS_CD:
-        raise HTTPException(status_code=422, detail="Opérateur Mobile Money non pris en charge pour les retraits RDC.")
+    if operator not in PAYIN_OPERATORS_CD:
+        raise HTTPException(status_code=422, detail="Opérateur Mobile Money non pris en charge pour les paiements entrants RDC.")
     phone = _normalize_drc_phone(data.phone)
     ciphertext = _encrypt_mobile_phone(phone)
     rows = db.query(MobileMoneyAccount).filter(
@@ -1660,6 +1793,222 @@ def create_transfer(
     }
 
 
+@app.get("/api/internal/llink/users/{think_user_id}/subscription")
+def get_llink_subscription_internal(
+    think_user_id: int,
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    """Consultation service-à-service des droits Llink ; aucun accès public par numéro seul."""
+    user = db.query(ThinkUser).filter(
+        ThinkUser.id == think_user_id,
+        ThinkUser.is_active.is_(True),
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    now = datetime.now(timezone.utc)
+    row = (
+        db.query(LlinkSubscription)
+        .filter(
+            LlinkSubscription.user_id == user.id,
+            LlinkSubscription.status == "active",
+            LlinkSubscription.starts_at <= now,
+            LlinkSubscription.expires_at > now,
+        )
+        .order_by(LlinkSubscription.expires_at.desc(), LlinkSubscription.created_at.desc())
+        .first()
+    )
+    if row is None:
+        latest = (
+            db.query(LlinkSubscription)
+            .filter(LlinkSubscription.user_id == user.id)
+            .order_by(LlinkSubscription.created_at.desc())
+            .first()
+        )
+        return {
+            "is_active": False,
+            "plan": latest.plan if latest else "",
+            "status": latest.status if latest else "inactive",
+            "expires_at": None,
+            "level": "velora",
+        }
+    level = {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}.get(row.plan, "velora")
+    return {
+        "is_active": True,
+        "plan": row.plan,
+        "status": row.status,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "level": level,
+    }
+
+
+@app.post("/api/internal/llink/users/{think_user_id}/payments/{public_id}/refresh")
+def refresh_llink_subscription_payment_internal(
+    think_user_id: int,
+    public_id: str,
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    """Vérifie directement auprès de CinetPay le paiement Llink de ce compte Think."""
+    user = db.query(ThinkUser).filter(
+        ThinkUser.id == think_user_id,
+        ThinkUser.is_active.is_(True),
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    payment = db.query(PaymentTransaction).filter(
+        PaymentTransaction.public_id == public_id,
+        PaymentTransaction.user_id == user.id,
+        PaymentTransaction.purpose == "llink_subscription",
+    ).first()
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Paiement Llink introuvable pour ce compte Think.")
+    if payment.status not in {"accepted", "failed"}:
+        payment = _fetch_and_sync_cinetpay_payment(db, payment)
+    subscription = db.query(LlinkSubscription).filter(
+        LlinkSubscription.payment_transaction_id == payment.id,
+        LlinkSubscription.user_id == user.id,
+    ).first()
+    if subscription is None:
+        raise HTTPException(status_code=409, detail="Abonnement associé à cette transaction introuvable.")
+    now = datetime.now(timezone.utc)
+    starts_at = subscription.starts_at
+    expires_at = subscription.expires_at
+    if starts_at is not None and starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    active = (
+        subscription.status == "active"
+        and starts_at is not None
+        and starts_at <= now
+        and expires_at is not None
+        and expires_at > now
+    )
+    return {
+        "ok": True,
+        "public_id": payment.public_id,
+        "payment_status": payment.status,
+        "subscription": {
+            "plan": subscription.plan,
+            "status": subscription.status,
+            "is_active": active,
+            "expires_at": subscription.expires_at.isoformat() if subscription.expires_at else None,
+            "level": {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}.get(subscription.plan, "velora"),
+        },
+    }
+
+@app.get("/api/internal/llink/users/{think_user_id}/mobile-money-accounts")
+def list_llink_mobile_money_accounts_internal(
+    think_user_id: int,
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(ThinkUser).filter(ThinkUser.id == think_user_id, ThinkUser.is_active.is_(True)).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    rows = (
+        db.query(MobileMoneyAccount)
+        .filter(MobileMoneyAccount.user_id == user.id, MobileMoneyAccount.is_active.is_(True))
+        .order_by(MobileMoneyAccount.is_default.desc(), MobileMoneyAccount.created_at.desc())
+        .all()
+    )
+    return {"items": [_serialize_mobile_money_account(row) for row in rows]}
+
+
+
+@app.post("/api/internal/llink/subscriptions/checkout")
+def create_llink_subscription_checkout_internal(
+    data: LlinkCheckoutData,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    """Crée un checkout Llink avec prix calculé côté Think, jamais fourni par le navigateur."""
+    user = db.query(ThinkUser).filter(
+        ThinkUser.id == data.think_user_id,
+        ThinkUser.is_active.is_(True),
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    plan = data.plan.strip().lower()
+    prices = _llink_plan_prices_cdf()
+    if plan not in prices:
+        raise HTTPException(status_code=400, detail="Formule Llink inconnue.")
+    payment_method = data.payment_method.strip().upper()
+    if payment_method not in {"OM_CD", "AIRTEL_CD", "MPESA_CD", "AFRICELL_CD"}:
+        raise HTTPException(status_code=422, detail="Moyen de paiement non pris en charge pour la RDC.")
+    checkout_id = data.checkout_id.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", checkout_id):
+        raise HTTPException(status_code=422, detail="Référence de checkout invalide.")
+    expected_key = f"llink-{user.id}-{checkout_id}"
+    if idempotency_key and idempotency_key.strip() != expected_key:
+        raise HTTPException(status_code=409, detail="Clé d'idempotence Llink incohérente.")
+    sub = db.query(LlinkSubscription).filter(
+        LlinkSubscription.user_id == user.id,
+        LlinkSubscription.checkout_id == expected_key,
+    ).with_for_update().first()
+    if sub is None:
+        sub = LlinkSubscription(
+            user_id=user.id,
+            checkout_id=expected_key,
+            plan=plan,
+            status="pending_payment",
+            amount=prices[plan],
+            currency="CDF",
+        )
+        db.add(sub)
+        db.commit()
+        db.refresh(sub)
+    elif (
+        sub.plan != plan
+        or Decimal(sub.amount) != prices[plan]
+        or sub.status not in {"pending_payment", "active"}
+    ):
+        raise HTTPException(status_code=409, detail="Cette clé de checkout est déjà utilisée pour une autre demande.")
+
+    payment_data = PaymentData(
+        purpose="llink_subscription",
+        amount=prices[plan],
+        currency="CDF",
+        description=f"Abonnement Llink {plan.title()}",
+        payment_method=payment_method,
+        mobile_money_account_id=data.mobile_money_account_id,
+    )
+    result = create_payment(
+        payment_data,
+        idempotency_key=expected_key,
+        db=db,
+        user=user,
+    )
+    payment_row = db.query(PaymentTransaction).filter(
+        PaymentTransaction.public_id == result["public_id"],
+        PaymentTransaction.user_id == user.id,
+    ).first()
+    if payment_row is None:
+        raise HTTPException(status_code=500, detail="La transaction Think créée est introuvable.")
+    if sub.payment_transaction_id not in {None, payment_row.id}:
+        raise HTTPException(status_code=409, detail="Cette demande Llink est déjà liée à une autre transaction.")
+    if sub.payment_transaction_id is None:
+        sub.payment_transaction_id = payment_row.id
+        db.commit()
+        db.refresh(sub)
+    return {
+        "ok": True,
+        "product": "llink",
+        "plan": plan,
+        "status": sub.status,
+        "subscription_id": sub.id,
+        "public_id": payment_row.public_id,
+        "merchant_transaction_id": payment_row.merchant_transaction_id,
+        "payment_url": result.get("payment_url"),
+        "amount": int(prices[plan]),
+        "currency": "CDF",
+        "expires_at": sub.expires_at.isoformat() if sub.expires_at else None,
+        "test_mode": result.get("test_mode", True),
+    }
+
+
 @app.get("/api/subscriptions")
 def subscription(db: Session = Depends(get_db), user: ThinkUser = Depends(get_current_user)):
     row = (
@@ -1845,6 +2194,15 @@ def _payment_return_url(public_id: str, result: str) -> str:
     return f"{base}/api/cinetpay/payin/return?payment={public_id}&result={result}"
 
 
+def _llink_payment_return_url(public_id: str, result: str) -> str:
+    base = os.getenv("LLINK_PUBLIC_BASE_URL", "https://ll-one-self.vercel.app").strip().rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(status_code=503, detail="LLINK_PUBLIC_BASE_URL doit être une URL HTTPS publique valide.")
+    return f"{base}/?llink_payment={public_id}&llink_result={result}"
+
+
+
 def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
     parsed = urlparse(payment_url or "")
     expected_host = "checkout.cinetpay.net" if mode == "sandbox" else "checkout.cinetpay.co"
@@ -1854,6 +2212,7 @@ def _validate_cinetpay_payment_url(payment_url: str, mode: str) -> None:
         raise HTTPException(status_code=502, detail="CinetPay a retourné une URL de paiement inattendue.")
 
 
+PAYIN_OPERATORS_CD = {"AIRTEL_CD", "OM_CD", "MPESA_CD", "AFRICELL_CD"}
 PAYOUT_OPERATORS_CD = {"AIRTEL_CD", "OM_CD", "MPESA_CD"}
 PAYOUT_MIN_CDF = 100
 PAYOUT_MAX_CDF = 1_500_000  # Limit imposed by the installed CinetPay Python SDK; confirm merchant-specific cap.
@@ -1912,7 +2271,7 @@ def _serialize_mobile_money_account(row: MobileMoneyAccount) -> dict[str, Any]:
     return {
         "id": row.id,
         "operator": row.operator,
-        "operator_label": {"AIRTEL_CD": "Airtel Money", "OM_CD": "Orange Money", "MPESA_CD": "M-Pesa"}.get(row.operator, row.operator),
+        "operator_label": {"AIRTEL_CD": "Airtel Money", "OM_CD": "Orange Money", "MPESA_CD": "M-Pesa", "AFRICELL_CD": "Africell Money"}.get(row.operator, row.operator),
         "label": row.label,
         "phone_masked": row.phone_masked,
         "is_default": row.is_default,
@@ -2165,40 +2524,81 @@ def _sync_cinetpay_payment_status(
         return locked
 
     if status == "SUCCESS":
-        wallet_row = (
-            db.query(Wallet)
-            .filter(Wallet.user_id == locked.user_id, Wallet.currency == locked.currency)
+        llink_subscription = (
+            db.query(LlinkSubscription)
+            .filter(LlinkSubscription.payment_transaction_id == locked.id)
             .with_for_update()
             .first()
         )
-        if wallet_row is None:
-            raise HTTPException(status_code=404, detail="Portefeuille du bénéficiaire introuvable.")
-        locked.status = "accepted"
-        ledger_reference = "CNPIN-" + locked.public_id
-        ledger_exists = db.query(LedgerEntry).filter(LedgerEntry.reference == ledger_reference).first()
-        if ledger_exists is None:
-            wallet_row.available_balance = Decimal(wallet_row.available_balance) + Decimal(locked.amount)
-            db.add(LedgerEntry(
-                wallet_id=wallet_row.id,
-                entry_type="DEPOSIT",
-                amount=Decimal(locked.amount),
-                currency=locked.currency,
-                status="confirmed",
-                reference=ledger_reference,
-                related_type="payment",
-                related_id=str(locked.id),
-                description=f"Dépôt CinetPay confirmé ({locked.merchant_transaction_id}).",
-                extra_data={"provider": "cinetpay_v1", "no_real_money": locked.provider_response.get("environment") == "sandbox"},
-            ))
-            notify_user(
-                db, locked.user_id, "Dépôt CinetPay confirmé",
-                f"{locked.amount} {locked.currency} ont été ajoutés à ton portefeuille Think.",
-                "finance",
-            )
-        else:
-            # A ledger row already exists: repair the payment status without crediting again.
+        if locked.purpose == "llink_subscription":
+            if llink_subscription is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Abonnement Llink associé à cette transaction introuvable ; aucun crédit portefeuille n'a été effectué.",
+                )
+            if llink_subscription.status != "active":
+                now = datetime.now(timezone.utc)
+                previous = (
+                    db.query(LlinkSubscription)
+                    .filter(
+                        LlinkSubscription.user_id == locked.user_id,
+                        LlinkSubscription.status == "active",
+                        LlinkSubscription.expires_at > now,
+                        LlinkSubscription.id != llink_subscription.id,
+                    )
+                    .order_by(LlinkSubscription.expires_at.desc())
+                    .first()
+                )
+                starts_at = previous.expires_at if previous and previous.expires_at else now
+                llink_subscription.status = "active"
+                llink_subscription.starts_at = starts_at
+                llink_subscription.expires_at = starts_at + timedelta(days=365)
+                notify_user(
+                    db, locked.user_id, "Abonnement Llink activé",
+                    f"Ton abonnement Llink {llink_subscription.plan.title()} est actif jusqu'au {llink_subscription.expires_at.date().isoformat()}.",
+                    "account",
+                )
             locked.status = "accepted"
+        else:
+            wallet_row = (
+                db.query(Wallet)
+                .filter(Wallet.user_id == locked.user_id, Wallet.currency == locked.currency)
+                .with_for_update()
+                .first()
+            )
+            if wallet_row is None:
+                raise HTTPException(status_code=404, detail="Portefeuille du bénéficiaire introuvable.")
+            locked.status = "accepted"
+            ledger_reference = "CNPIN-" + locked.public_id
+            ledger_exists = db.query(LedgerEntry).filter(LedgerEntry.reference == ledger_reference).first()
+            if ledger_exists is None:
+                wallet_row.available_balance = Decimal(wallet_row.available_balance) + Decimal(locked.amount)
+                db.add(LedgerEntry(
+                    wallet_id=wallet_row.id,
+                    entry_type="DEPOSIT",
+                    amount=Decimal(locked.amount),
+                    currency=locked.currency,
+                    status="confirmed",
+                    reference=ledger_reference,
+                    related_type="payment",
+                    related_id=str(locked.id),
+                    description=f"Dépôt CinetPay confirmé ({locked.merchant_transaction_id}).",
+                    extra_data={"provider": "cinetpay_v1", "no_real_money": locked.provider_response.get("environment") == "sandbox"},
+                ))
+                notify_user(
+                    db, locked.user_id, "Dépôt CinetPay confirmé",
+                    f"{locked.amount} {locked.currency} ont été ajoutés à ton portefeuille Think.",
+                    "finance",
+                )
+            else:
+                locked.status = "accepted"
     elif status in {"FAILED", "TRANSACTION_EXIST", "INSUFFICIENT_BALANCE"}:
+        if locked.purpose == "llink_subscription":
+            failed_subscription = db.query(LlinkSubscription).filter(
+                LlinkSubscription.payment_transaction_id == locked.id
+            ).with_for_update().first()
+            if failed_subscription is not None and failed_subscription.status != "active":
+                failed_subscription.status = "failed"
         locked.status = "failed"
     else:
         # INITIATED/PENDING and unknown transitional statuses remain pending.
@@ -2290,6 +2690,27 @@ def create_payment(
             detail="La première initialisation doit être vérifiée avant de créer une nouvelle demande. Utilise une nouvelle clé uniquement après rapprochement.",
         )
 
+    llink_subscription = None
+    if data.purpose == "llink_subscription":
+        llink_subscription = (
+            db.query(LlinkSubscription)
+            .filter(
+                LlinkSubscription.user_id == user.id,
+                LlinkSubscription.checkout_id == idempotency_key,
+                LlinkSubscription.status == "pending_payment",
+            )
+            .with_for_update()
+            .first()
+        )
+        if llink_subscription is None:
+            raise HTTPException(status_code=403, detail="Checkout abonnement Llink non autorisé.")
+        if (
+            llink_subscription.payment_transaction_id is not None
+            or Decimal(llink_subscription.amount) != amount_decimal
+            or llink_subscription.currency != currency
+        ):
+            raise HTTPException(status_code=409, detail="La demande d'abonnement Llink ne correspond pas au paiement.")
+
     public_id = "PAY-" + uuid4().hex[:16].upper()
     merchant_transaction_id = "THK" + uuid4().hex[:24].upper()
     row = PaymentTransaction(
@@ -2305,6 +2726,9 @@ def create_payment(
         provider_response={"environment": provider_config["mode"]},
     )
     db.add(row)
+    db.flush()
+    if llink_subscription is not None:
+        llink_subscription.payment_transaction_id = row.id
     db.commit()
     db.refresh(row)
 
@@ -2347,8 +2771,9 @@ def create_payment(
     try:
         from cinetpay import PaymentRequest
 
-        success_url = _payment_return_url(public_id, "success")
-        failed_url = _payment_return_url(public_id, "failed")
+        return_url = _llink_payment_return_url if data.purpose == "llink_subscription" else _payment_return_url
+        success_url = return_url(public_id, "success")
+        failed_url = return_url(public_id, "failed")
         request_data = PaymentRequest(
             currency=currency,
             merchant_transaction_id=merchant_transaction_id,

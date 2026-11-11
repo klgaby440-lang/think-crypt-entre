@@ -26,6 +26,12 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q main.py
 
+      - name: Run Think and Llink subscription tests
+        run: |
+          python -m pip install pytest
+          PYTHONPATH=. pytest -q tests/test_llink_subscription_flow.py
+
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -221,6 +227,7 @@ jobs:
           assert transfer.json()["transfer"]["status"] == "sandbox_pending"
           assert transfer.json()["no_real_money_sent"] is True
 
+          # Africell can be saved for PayIn, but it remains excluded from PayOut.
           # Save more than one Mobile Money number; the API returns masked values only.
           airtel_account = client.post("/api/mobile-money/accounts", headers=headers, json={
               "operator": "AIRTEL_CD",
@@ -236,12 +243,21 @@ jobs:
               "is_default": False,
           })
           assert orange_account.status_code == 200, orange_account.text
+          africell_account = client.post("/api/mobile-money/accounts", headers=headers, json={
+              "operator": "AFRICELL_CD",
+              "phone": "+243999000333",
+              "label": "Africell test",
+              "is_default": False,
+          })
+          assert africell_account.status_code == 200, africell_account.text
           saved_accounts = client.get("/api/mobile-money/accounts", headers=headers)
           assert saved_accounts.status_code == 200, saved_accounts.text
-          assert len(saved_accounts.json()["items"]) == 2
+          assert len(saved_accounts.json()["items"]) == 3
           assert "+243999000111" not in saved_accounts.text
           assert "+243999000222" not in saved_accounts.text
+          assert "+243999000333" not in saved_accounts.text
           orange_account_id = orange_account.json()["account"]["id"]
+          africell_account_id = africell_account.json()["account"]["id"]
 
           # Mock the CinetPay V1 transfer client. Test SUCCESS, PENDING then FAILED
           # without network access or real Mobile Money transfers.
@@ -276,6 +292,16 @@ jobs:
           )
           fake_payout_client = SimpleNamespace(transfer=fake_transfer_api)
           with patch.object(main, "_require_cinetpay_payout_sandbox", return_value=fake_payout_client):
+              unsupported_africell_payout = client.post("/api/withdrawals", headers={
+                  **headers, "Idempotency-Key": "alice-cinetpay-payout-africell-001"
+              }, json={
+                  "amount": "100",
+                  "currency": "CDF",
+                  "mobile_money_account_id": africell_account_id,
+              })
+              assert unsupported_africell_payout.status_code == 422, unsupported_africell_payout.text
+              assert fake_transfer_api.create.call_count == 0
+
               payout_headers = {**headers, "Idempotency-Key": "alice-cinetpay-payout-success-001"}
               payout_payload = {
                   "amount": "2000",
@@ -447,8 +473,8 @@ jobs:
               "amount": "1000",
               "currency": "CDF",
               "description": "Test dépôt CinetPay",
-              "payment_method": "OM_CD",
-              "mobile_money_account_id": orange_account_id,
+              "payment_method": "AFRICELL_CD",
+              "mobile_money_account_id": africell_account_id,
           }
           payin_headers = {**headers, "Idempotency-Key": "alice-cinetpay-payin-001"}
           with patch.object(main, "_require_cinetpay", return_value=(fake_cinetpay, payin_config)):
@@ -461,7 +487,7 @@ jobs:
               assert payin_json["payment_url"] == fake_payment_response.payment_url
               assert "notify_token" not in payin.text
               assert fake_payment_api.initialize.call_count == 1
-              assert fake_payment_api.initialize.call_args.args[0].client_phone_number == "+243999000222"
+              assert fake_payment_api.initialize.call_args.args[0].client_phone_number == "+243999000333"
 
               # Same key and payload returns the same checkout without creating another one.
               payin_replay = client.post("/api/payments/create", headers=payin_headers, json=payin_payload)
