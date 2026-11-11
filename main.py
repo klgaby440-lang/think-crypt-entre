@@ -742,18 +742,7 @@ def list_llink_credit_catalog():
 
 @app.get("/api/llink/plans")
 def list_llink_plans():
-    prices = _llink_plan_prices_cdf()
-    levels = {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}
-    return {
-        "product": "llink",
-        "currency": "CDF",
-        "period_days": 365,
-        "items": [
-            {"plan": plan, "level": levels[plan], "amount": int(amount), "currency": "CDF", "period_days": 365}
-            for plan, amount in prices.items()
-        ],
-    }
-
+    raise HTTPException(status_code=410, detail="Les abonnements Llink sont arrêtés. Les achats se font en crédits.")
 
 
 def issue_access_token(user: ThinkUser) -> str:
@@ -2072,94 +2061,9 @@ def list_llink_mobile_money_accounts_internal(
 
 @app.post("/api/internal/llink/subscriptions/checkout")
 def create_llink_subscription_checkout_internal(
-    data: LlinkCheckoutData,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     _service: None = Depends(_require_llink_service_token),
-    db: Session = Depends(get_db),
 ):
-    """Crée un checkout Llink avec prix calculé côté Think, jamais fourni par le navigateur."""
-    user = db.query(ThinkUser).filter(
-        ThinkUser.id == data.think_user_id,
-        ThinkUser.is_active.is_(True),
-    ).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
-    plan = data.plan.strip().lower()
-    prices = _llink_plan_prices_cdf()
-    if plan not in prices:
-        raise HTTPException(status_code=400, detail="Formule Llink inconnue.")
-    payment_method = data.payment_method.strip().upper()
-    if payment_method not in {"OM_CD", "AIRTEL_CD", "MPESA_CD", "AFRICELL_CD"}:
-        raise HTTPException(status_code=422, detail="Moyen de paiement non pris en charge pour la RDC.")
-    checkout_id = data.checkout_id.strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", checkout_id):
-        raise HTTPException(status_code=422, detail="Référence de checkout invalide.")
-    expected_key = f"llink-{user.id}-{checkout_id}"
-    if idempotency_key and idempotency_key.strip() != expected_key:
-        raise HTTPException(status_code=409, detail="Clé d'idempotence Llink incohérente.")
-    sub = db.query(LlinkSubscription).filter(
-        LlinkSubscription.user_id == user.id,
-        LlinkSubscription.checkout_id == expected_key,
-    ).with_for_update().first()
-    if sub is None:
-        sub = LlinkSubscription(
-            user_id=user.id,
-            checkout_id=expected_key,
-            plan=plan,
-            status="pending_payment",
-            amount=prices[plan],
-            currency="CDF",
-        )
-        db.add(sub)
-        db.commit()
-        db.refresh(sub)
-    elif (
-        sub.plan != plan
-        or Decimal(sub.amount) != prices[plan]
-        or sub.status not in {"pending_payment", "active"}
-    ):
-        raise HTTPException(status_code=409, detail="Cette clé de checkout est déjà utilisée pour une autre demande.")
-
-    payment_data = PaymentData(
-        purpose="llink_subscription",
-        amount=prices[plan],
-        currency="CDF",
-        description=f"Abonnement Llink {plan.title()}",
-        payment_method=payment_method,
-        mobile_money_account_id=data.mobile_money_account_id,
-    )
-    result = create_payment(
-        payment_data,
-        idempotency_key=expected_key,
-        db=db,
-        user=user,
-    )
-    payment_row = db.query(PaymentTransaction).filter(
-        PaymentTransaction.public_id == result["public_id"],
-        PaymentTransaction.user_id == user.id,
-    ).first()
-    if payment_row is None:
-        raise HTTPException(status_code=500, detail="La transaction Think créée est introuvable.")
-    if sub.payment_transaction_id not in {None, payment_row.id}:
-        raise HTTPException(status_code=409, detail="Cette demande Llink est déjà liée à une autre transaction.")
-    if sub.payment_transaction_id is None:
-        sub.payment_transaction_id = payment_row.id
-        db.commit()
-        db.refresh(sub)
-    return {
-        "ok": True,
-        "product": "llink",
-        "plan": plan,
-        "status": sub.status,
-        "subscription_id": sub.id,
-        "public_id": payment_row.public_id,
-        "merchant_transaction_id": payment_row.merchant_transaction_id,
-        "payment_url": result.get("payment_url"),
-        "amount": int(prices[plan]),
-        "currency": "CDF",
-        "expires_at": sub.expires_at.isoformat() if sub.expires_at else None,
-        "test_mode": result.get("test_mode", True),
-    }
+    raise HTTPException(status_code=410, detail="Les abonnements Llink sont arrêtés. Utilise le checkout de crédits.")
 
 
 @app.get("/api/subscriptions")
