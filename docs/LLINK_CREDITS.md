@@ -10,6 +10,10 @@ Think owns Mobile Money checkout and CDF amount calculation for Llink credit pur
 - CinetPay amount is CDF, an integer multiple of 5, minimum 100 and maximum 2,500,000.
 - No Llink credit purchase changes the Think monetary wallet balance.
 
+## Legacy subscription routes
+
+The old Llink plan catalog and internal subscription checkout return HTTP 410. Existing subscription records and refresh logic are retained only for compatibility with already-created transactions; new Llink purchases must use the credit checkout.
+
 ## New storage
 
 The `llink_credit_purchases` table stores the requested credit amount, wallet type, CDF rate snapshot, payment transaction and status. A unique payment transaction constraint prevents one payment from backing multiple purchases.
