@@ -25,6 +25,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     or_,
+    func,
     create_engine,
     text,
 )
@@ -987,6 +988,124 @@ def serialize_user(db: Session, user: ThinkUser) -> dict[str, Any]:
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse(BASE_DIR / "app" / "index.html", media_type="text/html")
+
+
+def require_crypt_console_service(
+    token: str | None = Header(default=None, alias="X-CRYPT-CONSOLE-TOKEN"),
+) -> bool:
+    """Autorise uniquement le service CRYPT Console avec son secret dédié."""
+    expected = os.getenv("CRYPT_CONSOLE_SERVICE_TOKEN", "").strip()
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="CRYPT_CONSOLE_SERVICE_TOKEN n'est pas configuré.")
+    if not token or not secrets.compare_digest(token.strip(), expected):
+        raise HTTPException(status_code=401, detail="Authentification CRYPT Console invalide.")
+    return True
+
+
+@app.get("/api/internal/crypt-console/overview")
+def crypt_console_internal_overview(
+    db: Session = Depends(get_db),
+    _service: bool = Depends(require_crypt_console_service),
+):
+    now = datetime.now(timezone.utc)
+    paid_credit_query = db.query(LlinkCreditPurchase).filter(LlinkCreditPurchase.status == "paid")
+    wallets = db.query(
+        Wallet.currency,
+        func.coalesce(func.sum(Wallet.available_balance), 0),
+        func.coalesce(func.sum(Wallet.reserved_balance), 0),
+    ).group_by(Wallet.currency).all()
+    return {
+        "status": True,
+        "data": {
+            "users_total": db.query(ThinkUser).count(),
+            "users_active": db.query(ThinkUser).filter(ThinkUser.is_active.is_(True)).count(),
+            "users_created_30d": db.query(ThinkUser).filter(ThinkUser.created_at >= now - timedelta(days=30)).count(),
+            "payments_total": db.query(PaymentTransaction).count(),
+            "payments_pending": db.query(PaymentTransaction).filter(PaymentTransaction.status.in_(("pending", "initializing", "payout_pending"))).count(),
+            "payments_accepted": db.query(PaymentTransaction).filter(PaymentTransaction.status == "accepted").count(),
+            "wallet_balances": {
+                str(currency): {
+                    "available": float(available or 0),
+                    "reserved": float(reserved or 0),
+                }
+                for currency, available, reserved in wallets
+            },
+            "llink_credit_purchases": {
+                "count_paid": paid_credit_query.count(),
+                "credits_paid": int(db.query(func.coalesce(func.sum(LlinkCreditPurchase.credits), 0)).filter(LlinkCreditPurchase.status == "paid").scalar() or 0),
+                "amount_paid_cdf": float(db.query(func.coalesce(func.sum(LlinkCreditPurchase.amount), 0)).filter(LlinkCreditPurchase.status == "paid").scalar() or 0),
+                "pending": db.query(LlinkCreditPurchase).filter(LlinkCreditPurchase.status == "pending_payment").count(),
+            },
+        },
+    }
+
+
+@app.get("/api/internal/crypt-console/users")
+def crypt_console_internal_users(
+    query: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    _service: bool = Depends(require_crypt_console_service),
+):
+    term = str(query or "").strip()
+    if len(term) < 3:
+        raise HTTPException(status_code=422, detail="Saisis au moins 3 caractères pour rechercher un compte.")
+    limit = max(1, min(int(limit or 50), 100))
+    pattern = "%" + term.replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = db.query(ThinkUser).filter(or_(
+        ThinkUser.crypt_id.ilike(pattern),
+        ThinkUser.think_id.ilike(pattern),
+        ThinkUser.email.ilike(pattern),
+        ThinkUser.full_name.ilike(pattern),
+    )).order_by(ThinkUser.created_at.desc()).limit(limit).all()
+    result = []
+    for user in rows:
+        balances = db.query(Wallet.currency, Wallet.available_balance, Wallet.reserved_balance).filter(
+            Wallet.user_id == user.id
+        ).all()
+        result.append({
+            "id": user.id,
+            "crypt_id": user.crypt_id,
+            "think_id": user.think_id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "is_active": bool(user.is_active),
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "wallets": {
+                str(currency): {"available": float(available or 0), "reserved": float(reserved or 0)}
+                for currency, available, reserved in balances
+            },
+        })
+    return {"status": True, "data": result}
+
+
+@app.patch("/api/internal/crypt-console/users/{crypt_id}/status")
+def crypt_console_internal_update_user_status(
+    crypt_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    _service: bool = Depends(require_crypt_console_service),
+):
+    wanted = payload.get("is_active")
+    if not isinstance(wanted, bool):
+        raise HTTPException(status_code=422, detail="is_active doit être un booléen.")
+    identifier = crypt_id.strip().upper()
+    user = db.query(ThinkUser).filter(ThinkUser.crypt_id == identifier).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Identifiant CRYPT introuvable.")
+    user.is_active = wanted
+    db.commit()
+    logger.warning(
+        "CRYPT Console changed Think account status: crypt_id=%s active=%s",
+        user.crypt_id, wanted,
+    )
+    return {
+        "status": True,
+        "data": {
+            "crypt_id": user.crypt_id,
+            "is_active": bool(user.is_active),
+        },
+    }
 
 
 @app.get("/health")
