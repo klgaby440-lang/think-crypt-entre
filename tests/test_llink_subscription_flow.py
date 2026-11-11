@@ -380,3 +380,25 @@ def test_internal_refresh_is_scoped_to_the_think_user_and_subscription(db_sessio
         )
     assert error.value.status_code == 404
 
+
+
+def test_crypt_id_has_exactly_15_symbols_after_prefix():
+    import re
+    generated = main._new_crypt_id()
+    assert re.fullmatch(r"INK_[A-HJ-NP-Z2-9]{15}", generated)
+    assert len(generated) == 19
+
+
+def test_login_accepts_crypt_id_and_returns_same_account(db_session, monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "test-jwt-secret-" + ("z" * 48))
+    user = _user(db_session)
+    user.password_hash = main.PASSWORD_HASHER.hash("CorrectHorseBattery123!")
+    db_session.commit()
+
+    result = main.login(
+        main.Credentials(email=user.crypt_id.lower(), password="CorrectHorseBattery123!"),
+        db_session,
+    )
+    assert result["user"]["crypt_id"] == user.crypt_id
+    assert result["user"]["think_id"] == user.think_id
+    assert result["access_token"]
