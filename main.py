@@ -25,6 +25,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     or_,
+    func,
     create_engine,
     text,
 )
@@ -73,6 +74,10 @@ class ThinkUser(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     think_id = Column(String(32), nullable=False, unique=True, index=True)
+    # Stable CRYPT-wide account identifier: INK_ + exactly 15 uppercase letters/digits.
+    # Nullable at ORM declaration time so existing PostgreSQL installations can be
+    # upgraded by the idempotent migration before the service starts serving traffic.
+    crypt_id = Column(String(19), nullable=True)
     email = Column(String(320), nullable=False, unique=True, index=True)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(120), nullable=False)
@@ -87,6 +92,58 @@ class ThinkUser(Base):
     subscriptions = relationship("Subscription", back_populates="user")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
     profile = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+
+
+INK_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _new_crypt_id() -> str:
+    """Return a hard-to-guess universal CRYPT identifier: INK_ plus 15 symbols."""
+    return "INK_" + "".join(secrets.choice(INK_ID_ALPHABET) for _ in range(15))
+
+
+def generate_crypt_id(db: Session) -> str:
+    """Generate an unused CRYPT ID; the database unique index remains authoritative."""
+    for _ in range(30):
+        candidate = _new_crypt_id()
+        exists = db.query(ThinkUser.id).filter(ThinkUser.crypt_id == candidate).first()
+        if exists is None:
+            return candidate
+    raise HTTPException(status_code=503, detail="Impossible de générer un identifiant CRYPT. Réessaie.")
+
+
+def _backfill_crypt_ids(engine) -> None:
+    """Idempotently add/backfill the INK ID column on existing Think PostgreSQL databases."""
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE think_users ADD COLUMN IF NOT EXISTS crypt_id VARCHAR(19)"
+        ))
+        rows = connection.execute(text(
+            "SELECT id FROM think_users WHERE crypt_id IS NULL OR crypt_id = '' ORDER BY id"
+        )).fetchall()
+        for row in rows:
+            assigned = False
+            for _ in range(30):
+                candidate = _new_crypt_id()
+                exists = connection.execute(
+                    text("SELECT 1 FROM think_users WHERE crypt_id = :crypt_id LIMIT 1"),
+                    {"crypt_id": candidate},
+                ).first()
+                if exists is None:
+                    connection.execute(
+                        text("UPDATE think_users SET crypt_id = :crypt_id WHERE id = :user_id"),
+                        {"crypt_id": candidate, "user_id": row[0]},
+                    )
+                    assigned = True
+                    break
+            if not assigned:
+                raise RuntimeError(f"Unable to assign a unique CRYPT ID to Think user {row[0]}.")
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_think_users_crypt_id ON think_users (crypt_id)"
+        ))
+        connection.execute(text(
+            "ALTER TABLE think_users ALTER COLUMN crypt_id SET NOT NULL"
+        ))
 
 
 class UserProfile(Base):
@@ -444,6 +501,7 @@ def initialize_database():
         with think_engine.connect() as connection:
             connection.execute(text("SELECT 1"))
         Base.metadata.create_all(bind=think_engine)
+        _backfill_crypt_ids(think_engine)
     except Exception:
         think_engine.dispose()
         raise
@@ -501,6 +559,8 @@ def shutdown_database():
 # ---------------------------------------------------------------------------
 
 class Credentials(BaseModel):
+    # Kept under the legacy "email" JSON key for client compatibility. It now
+    # accepts either an email address or a CRYPT INK ID.
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=128)
 
@@ -894,7 +954,7 @@ def serialize_user(db: Session, user: ThinkUser) -> dict[str, Any]:
         .order_by(Subscription.created_at.desc()).first()
     )
     return {
-        "id": user.id, "think_id": user.think_id, "email": user.email,
+        "id": user.id, "crypt_id": user.crypt_id, "think_id": user.think_id, "email": user.email,
         "full_name": user.full_name, "phone": user.phone or "",
         "profile": {
             "username": profile.username if profile else "",
@@ -930,6 +990,124 @@ def index():
     return FileResponse(BASE_DIR / "app" / "index.html", media_type="text/html")
 
 
+def require_crypt_console_service(
+    token: str | None = Header(default=None, alias="X-CRYPT-CONSOLE-TOKEN"),
+) -> bool:
+    """Autorise uniquement le service CRYPT Console avec son secret dédié."""
+    expected = os.getenv("CRYPT_CONSOLE_SERVICE_TOKEN", "").strip()
+    if len(expected) < 32:
+        raise HTTPException(status_code=503, detail="CRYPT_CONSOLE_SERVICE_TOKEN n'est pas configuré.")
+    if not token or not secrets.compare_digest(token.strip(), expected):
+        raise HTTPException(status_code=401, detail="Authentification CRYPT Console invalide.")
+    return True
+
+
+@app.get("/api/internal/crypt-console/overview")
+def crypt_console_internal_overview(
+    db: Session = Depends(get_db),
+    _service: bool = Depends(require_crypt_console_service),
+):
+    now = datetime.now(timezone.utc)
+    paid_credit_query = db.query(LlinkCreditPurchase).filter(LlinkCreditPurchase.status == "paid")
+    wallets = db.query(
+        Wallet.currency,
+        func.coalesce(func.sum(Wallet.available_balance), 0),
+        func.coalesce(func.sum(Wallet.reserved_balance), 0),
+    ).group_by(Wallet.currency).all()
+    return {
+        "status": True,
+        "data": {
+            "users_total": db.query(ThinkUser).count(),
+            "users_active": db.query(ThinkUser).filter(ThinkUser.is_active.is_(True)).count(),
+            "users_created_30d": db.query(ThinkUser).filter(ThinkUser.created_at >= now - timedelta(days=30)).count(),
+            "payments_total": db.query(PaymentTransaction).count(),
+            "payments_pending": db.query(PaymentTransaction).filter(PaymentTransaction.status.in_(("pending", "initializing", "payout_pending"))).count(),
+            "payments_accepted": db.query(PaymentTransaction).filter(PaymentTransaction.status == "accepted").count(),
+            "wallet_balances": {
+                str(currency): {
+                    "available": float(available or 0),
+                    "reserved": float(reserved or 0),
+                }
+                for currency, available, reserved in wallets
+            },
+            "llink_credit_purchases": {
+                "count_paid": paid_credit_query.count(),
+                "credits_paid": int(db.query(func.coalesce(func.sum(LlinkCreditPurchase.credits), 0)).filter(LlinkCreditPurchase.status == "paid").scalar() or 0),
+                "amount_paid_cdf": float(db.query(func.coalesce(func.sum(LlinkCreditPurchase.amount), 0)).filter(LlinkCreditPurchase.status == "paid").scalar() or 0),
+                "pending": db.query(LlinkCreditPurchase).filter(LlinkCreditPurchase.status == "pending_payment").count(),
+            },
+        },
+    }
+
+
+@app.get("/api/internal/crypt-console/users")
+def crypt_console_internal_users(
+    query: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    _service: bool = Depends(require_crypt_console_service),
+):
+    term = str(query or "").strip()
+    if len(term) < 3:
+        raise HTTPException(status_code=422, detail="Saisis au moins 3 caractères pour rechercher un compte.")
+    limit = max(1, min(int(limit or 50), 100))
+    pattern = "%" + term.replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = db.query(ThinkUser).filter(or_(
+        ThinkUser.crypt_id.ilike(pattern, escape="\\"),
+        ThinkUser.think_id.ilike(pattern, escape="\\"),
+        ThinkUser.email.ilike(pattern, escape="\\"),
+        ThinkUser.full_name.ilike(pattern, escape="\\"),
+    )).order_by(ThinkUser.created_at.desc()).limit(limit).all()
+    result = []
+    for user in rows:
+        balances = db.query(Wallet.currency, Wallet.available_balance, Wallet.reserved_balance).filter(
+            Wallet.user_id == user.id
+        ).all()
+        result.append({
+            "id": user.id,
+            "crypt_id": user.crypt_id,
+            "think_id": user.think_id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "is_active": bool(user.is_active),
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "wallets": {
+                str(currency): {"available": float(available or 0), "reserved": float(reserved or 0)}
+                for currency, available, reserved in balances
+            },
+        })
+    return {"status": True, "data": result}
+
+
+@app.patch("/api/internal/crypt-console/users/{crypt_id}/status")
+def crypt_console_internal_update_user_status(
+    crypt_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    _service: bool = Depends(require_crypt_console_service),
+):
+    wanted = payload.get("is_active")
+    if not isinstance(wanted, bool):
+        raise HTTPException(status_code=422, detail="is_active doit être un booléen.")
+    identifier = crypt_id.strip().upper()
+    user = db.query(ThinkUser).filter(ThinkUser.crypt_id == identifier).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Identifiant CRYPT introuvable.")
+    user.is_active = wanted
+    db.commit()
+    logger.warning(
+        "CRYPT Console changed Think account status: crypt_id=%s active=%s",
+        user.crypt_id, wanted,
+    )
+    return {
+        "status": True,
+        "data": {
+            "crypt_id": user.crypt_id,
+            "is_active": bool(user.is_active),
+        },
+    }
+
+
 @app.get("/health")
 def health():
     if database_engine is None:
@@ -963,6 +1141,7 @@ def register(data: RegisterData, db: Session = Depends(get_db)):
 
     user = ThinkUser(
         think_id="THK-" + uuid4().hex[:12].upper(),
+        crypt_id=generate_crypt_id(db),
         email=email,
         password_hash=PASSWORD_HASHER.hash(data.password),
         full_name=data.full_name.strip(),
@@ -989,12 +1168,18 @@ def register(data: RegisterData, db: Session = Depends(get_db)):
 @app.post("/api/auth/login")
 def login(data: Credentials, db: Session = Depends(get_db)):
     _jwt_secret()
-    email = data.email.strip().lower()
-    user = db.query(ThinkUser).filter(
-        ThinkUser.email == email, ThinkUser.is_active.is_(True)
-    ).first()
+    identifier = data.email.strip()
+    normalized = identifier.upper()
+    if re.fullmatch(r"INK_[A-Z0-9]{15}", normalized):
+        user = db.query(ThinkUser).filter(
+            ThinkUser.crypt_id == normalized, ThinkUser.is_active.is_(True)
+        ).first()
+    else:
+        user = db.query(ThinkUser).filter(
+            ThinkUser.email == identifier.lower(), ThinkUser.is_active.is_(True)
+        ).first()
     if user is None or not PASSWORD_HASHER.verify(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="E-mail ou mot de passe incorrect.")
+        raise HTTPException(status_code=401, detail="Identifiant CRYPT ou mot de passe incorrect.")
     return {"access_token": issue_access_token(user), "token_type": "bearer", "user": serialize_user(db, user)}
 
 
@@ -1017,6 +1202,7 @@ def exchange_llink_sso(user: ThinkUser = Depends(get_current_user)):
         {
             "sub": str(user.id),
             "think_id": user.think_id,
+            "crypt_id": user.crypt_id,
             "email": user.email,
             "name": user.full_name,
             "scope": "llink",
@@ -1033,7 +1219,7 @@ def exchange_llink_sso(user: ThinkUser = Depends(get_current_user)):
         "sso_token": token,
         "token_type": "bearer",
         "expires_in": 120,
-        "user": {"think_id": user.think_id, "email": user.email, "full_name": user.full_name},
+        "user": {"crypt_id": user.crypt_id, "think_id": user.think_id, "email": user.email, "full_name": user.full_name},
     }
 
 
