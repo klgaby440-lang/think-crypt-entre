@@ -1997,8 +1997,8 @@ def create_llink_credit_checkout_internal(
     checkout_id = data.checkout_id.strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", checkout_id):
         raise HTTPException(status_code=422, detail="Référence de checkout invalide.")
-    if data.wallet_type not in {"online", "offline"}:
-        raise HTTPException(status_code=422, detail="Portefeuille Llink invalide.")
+    if data.wallet_type != "online":
+        raise HTTPException(status_code=409, detail="Les achats Offline sont temporairement désactivés jusqu’à la sécurisation des autorisations par appareil.")
     expected_key = f"llink-credit-{user.id}-{checkout_id}"
     if idempotency_key and idempotency_key.strip() != expected_key:
         raise HTTPException(status_code=409, detail="Clé d'idempotence Llink incohérente.")
@@ -2963,7 +2963,7 @@ def create_payment(
     try:
         from cinetpay import PaymentRequest
 
-        return_url = _llink_payment_return_url if data.purpose == "llink_subscription" else _payment_return_url
+        return_url = _llink_payment_return_url if data.purpose in {"llink_subscription", "llink_credits"} else _payment_return_url
         success_url = return_url(public_id, "success")
         failed_url = return_url(public_id, "failed")
         request_data = PaymentRequest(
