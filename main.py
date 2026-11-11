@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from urllib.parse import urlparse
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING
 from uuid import uuid4
 from pathlib import Path
 from typing import Any
@@ -322,6 +322,27 @@ class LlinkSubscription(Base):
     user = relationship("ThinkUser")
 
 
+class LlinkCreditPurchase(Base):
+    """Achat ponctuel de crédits Llink, séparé du portefeuille monétaire Think."""
+    __tablename__ = "llink_credit_purchases"
+    __table_args__ = (
+        UniqueConstraint("payment_transaction_id", name="uq_llink_credit_payment"),
+        UniqueConstraint("user_id", "checkout_id", name="uq_llink_credit_user_checkout"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("think_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    checkout_id = Column(String(128), nullable=False)
+    credits = Column(Integer, nullable=False)
+    wallet_type = Column(String(16), nullable=False, default="online")
+    status = Column(String(24), nullable=False, default="pending_payment", index=True)
+    amount = Column(Numeric(20, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="CDF")
+    cdf_per_usd = Column(Numeric(16, 4), nullable=False)
+    payment_transaction_id = Column(Integer, ForeignKey("payment_transactions.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class Notification(Base):
     __tablename__ = "notifications"
 
@@ -553,6 +574,15 @@ class LlinkCheckoutData(BaseModel):
     mobile_money_account_id: int | None = Field(default=None, gt=0)
 
 
+class LlinkCreditCheckoutData(BaseModel):
+    think_user_id: int = Field(gt=0)
+    credits: int = Field(ge=1, le=500000)
+    wallet_type: str = Field(default="online", pattern="^(online|offline)$")
+    payment_method: str = Field(min_length=3, max_length=24)
+    checkout_id: str = Field(min_length=8, max_length=64)
+    mobile_money_account_id: int | None = Field(default=None, gt=0)
+
+
 class SandboxCreditData(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(min_length=3, max_length=3)
@@ -666,6 +696,48 @@ def _llink_plan_prices_cdf() -> dict[str, Decimal]:
             )
         prices[plan] = amount
     return prices
+
+
+def _llink_cdf_per_usd() -> Decimal:
+    raw = os.getenv("LLINK_CDF_PER_USD", "").strip()
+    try:
+        rate = Decimal(raw)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Configure LLINK_CDF_PER_USD sur Think avec le taux CDF/USD choisi.") from None
+    if not rate.is_finite() or rate <= 0 or rate > Decimal("10000000"):
+        raise HTTPException(status_code=503, detail="LLINK_CDF_PER_USD doit être un taux positif valide.")
+    return rate
+
+
+def _llink_credit_price_cdf(credits: int, rate: Decimal | None = None) -> Decimal:
+    if credits < 1 or credits > 500000:
+        raise HTTPException(status_code=422, detail="Le nombre de crédits doit être compris entre 1 et 500 000.")
+    applied_rate = rate or _llink_cdf_per_usd()
+    exact = Decimal(credits) * Decimal("0.01") * applied_rate
+    # CinetPay exige un montant CDF entier, multiple de 5, et au moins 100 CDF.
+    amount = (exact / Decimal(5)).to_integral_value(rounding=ROUND_CEILING) * Decimal(5)
+    if amount < 100:
+        amount = Decimal(100)
+    if amount > Decimal(2500000):
+        raise HTTPException(status_code=422, detail="Le montant dépasse la limite CinetPay de 2 500 000 CDF.")
+    return amount
+
+
+@app.get("/api/llink/credits/catalog")
+def list_llink_credit_catalog():
+    rate = _llink_cdf_per_usd()
+    minimum = max(1, int((Decimal(100) / (Decimal("0.01") * rate)).to_integral_value(rounding=ROUND_CEILING)))
+    maximum = min(500000, int((Decimal(2500000) / (Decimal("0.01") * rate)).to_integral_value(rounding=ROUND_HALF_UP)))
+    return {
+        "product": "llink",
+        "credit_usd": "0.01",
+        "credits_per_usd": 100,
+        "currency": "CDF",
+        "cdf_per_usd": float(rate),
+        "minimum_credits": minimum,
+        "maximum_credits": max(minimum, maximum),
+        "wallet_types": ["online", "offline"],
+    }
 
 
 @app.get("/api/llink/plans")
@@ -1859,12 +1931,24 @@ def refresh_llink_subscription_payment_internal(
     payment = db.query(PaymentTransaction).filter(
         PaymentTransaction.public_id == public_id,
         PaymentTransaction.user_id == user.id,
-        PaymentTransaction.purpose == "llink_subscription",
+        PaymentTransaction.purpose.in_(["llink_subscription", "llink_credits"]),
     ).first()
     if payment is None:
         raise HTTPException(status_code=404, detail="Paiement Llink introuvable pour ce compte Think.")
     if payment.status not in {"accepted", "failed"}:
         payment = _fetch_and_sync_cinetpay_payment(db, payment)
+    if payment.purpose == "llink_credits":
+        purchase = db.query(LlinkCreditPurchase).filter(
+            LlinkCreditPurchase.payment_transaction_id == payment.id,
+            LlinkCreditPurchase.user_id == user.id,
+        ).first()
+        if purchase is None:
+            raise HTTPException(status_code=409, detail="Achat de crédits associé à ce paiement introuvable.")
+        return {
+            "ok": True, "public_id": payment.public_id, "payment_status": payment.status,
+            "credits": {"purchased": purchase.credits, "wallet_type": purchase.wallet_type,
+                        "status": purchase.status, "cdf_per_usd": float(purchase.cdf_per_usd)},
+        }
     subscription = db.query(LlinkSubscription).filter(
         LlinkSubscription.payment_transaction_id == payment.id,
         LlinkSubscription.user_id == user.id,
@@ -1897,6 +1981,75 @@ def refresh_llink_subscription_payment_internal(
             "level": {"bronze": "satori", "silver": "noetra", "gold": "auren", "diamant": "omnis"}.get(subscription.plan, "velora"),
         },
     }
+
+@app.post("/api/internal/llink/credits/checkout")
+def create_llink_credit_checkout_internal(
+    data: LlinkCreditCheckoutData,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    _service: None = Depends(_require_llink_service_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(ThinkUser).filter(
+        ThinkUser.id == data.think_user_id, ThinkUser.is_active.is_(True)
+    ).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="Compte Think introuvable ou désactivé.")
+    checkout_id = data.checkout_id.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", checkout_id):
+        raise HTTPException(status_code=422, detail="Référence de checkout invalide.")
+    if data.wallet_type not in {"online", "offline"}:
+        raise HTTPException(status_code=422, detail="Portefeuille Llink invalide.")
+    expected_key = f"llink-credit-{user.id}-{checkout_id}"
+    if idempotency_key and idempotency_key.strip() != expected_key:
+        raise HTTPException(status_code=409, detail="Clé d'idempotence Llink incohérente.")
+    rate = _llink_cdf_per_usd()
+    amount = _llink_credit_price_cdf(data.credits, rate)
+    purchase = db.query(LlinkCreditPurchase).filter(
+        LlinkCreditPurchase.user_id == user.id,
+        LlinkCreditPurchase.checkout_id == expected_key,
+    ).with_for_update().first()
+    if purchase is None:
+        purchase = LlinkCreditPurchase(
+            user_id=user.id, checkout_id=expected_key, credits=data.credits,
+            wallet_type=data.wallet_type, status="pending_payment", amount=amount,
+            currency="CDF", cdf_per_usd=rate,
+        )
+        db.add(purchase)
+        db.commit()
+        db.refresh(purchase)
+    elif purchase.credits != data.credits or purchase.wallet_type != data.wallet_type or Decimal(purchase.amount) != amount:
+        raise HTTPException(status_code=409, detail="Cette clé de checkout est déjà utilisée pour un autre achat.")
+    payment_data = PaymentData(
+        purpose="llink_credits",
+        amount=amount,
+        currency="CDF",
+        description=f"Achat de {data.credits} crédits Llink ({data.wallet_type})",
+        payment_method=data.payment_method,
+        mobile_money_account_id=data.mobile_money_account_id,
+    )
+    result = create_payment(payment_data, idempotency_key=expected_key, db=db, user=user)
+    payment_row = db.query(PaymentTransaction).filter(
+        PaymentTransaction.public_id == result["public_id"],
+        PaymentTransaction.user_id == user.id,
+    ).first()
+    if payment_row is None:
+        raise HTTPException(status_code=500, detail="La transaction Think créée est introuvable.")
+    if purchase.payment_transaction_id not in {None, payment_row.id}:
+        raise HTTPException(status_code=409, detail="Cet achat est déjà lié à une autre transaction.")
+    if purchase.payment_transaction_id is None:
+        purchase.payment_transaction_id = payment_row.id
+        db.commit()
+        db.refresh(purchase)
+    return {
+        "ok": True, "product": "llink", "credits": purchase.credits,
+        "wallet_type": purchase.wallet_type, "public_id": payment_row.public_id,
+        "merchant_transaction_id": payment_row.merchant_transaction_id,
+        "payment_url": result.get("payment_url"), "amount": int(amount),
+        "currency": "CDF", "cdf_per_usd": float(rate),
+        "payment_status": payment_row.status,
+        "test_mode": result.get("test_mode", True),
+    }
+
 
 @app.get("/api/internal/llink/users/{think_user_id}/mobile-money-accounts")
 def list_llink_mobile_money_accounts_internal(
@@ -2524,13 +2677,30 @@ def _sync_cinetpay_payment_status(
         return locked
 
     if status == "SUCCESS":
+        credit_purchase = (
+            db.query(LlinkCreditPurchase)
+            .filter(LlinkCreditPurchase.payment_transaction_id == locked.id)
+            .with_for_update()
+            .first()
+        )
         llink_subscription = (
             db.query(LlinkSubscription)
             .filter(LlinkSubscription.payment_transaction_id == locked.id)
             .with_for_update()
             .first()
         )
-        if locked.purpose == "llink_subscription":
+        if locked.purpose == "llink_credits":
+            if credit_purchase is None:
+                raise HTTPException(status_code=409, detail="Achat de crédits Llink introuvable ; aucun portefeuille Think n'a été crédité.")
+            if credit_purchase.status != "paid":
+                credit_purchase.status = "paid"
+                notify_user(
+                    db, locked.user_id, "Paiement Llink confirmé",
+                    f"{credit_purchase.credits} crédits Llink ont été achetés. Ils seront ajoutés au portefeuille Llink après vérification.",
+                    "account",
+                )
+            locked.status = "accepted"
+        elif locked.purpose == "llink_subscription":
             if llink_subscription is None:
                 raise HTTPException(
                     status_code=409,
@@ -2599,6 +2769,12 @@ def _sync_cinetpay_payment_status(
             ).with_for_update().first()
             if failed_subscription is not None and failed_subscription.status != "active":
                 failed_subscription.status = "failed"
+        elif locked.purpose == "llink_credits":
+            failed_purchase = db.query(LlinkCreditPurchase).filter(
+                LlinkCreditPurchase.payment_transaction_id == locked.id
+            ).with_for_update().first()
+            if failed_purchase is not None and failed_purchase.status != "paid":
+                failed_purchase.status = "failed"
         locked.status = "failed"
     else:
         # INITIATED/PENDING and unknown transitional statuses remain pending.
@@ -2691,6 +2867,20 @@ def create_payment(
         )
 
     llink_subscription = None
+    llink_credit_purchase = None
+    if data.purpose == "llink_credits":
+        llink_credit_purchase = (
+            db.query(LlinkCreditPurchase)
+            .filter(
+                LlinkCreditPurchase.user_id == user.id,
+                LlinkCreditPurchase.checkout_id == idempotency_key,
+                LlinkCreditPurchase.status == "pending_payment",
+            ).with_for_update().first()
+        )
+        if llink_credit_purchase is None or llink_credit_purchase.payment_transaction_id is not None:
+            raise HTTPException(status_code=403, detail="Achat de crédits Llink non autorisé.")
+        if Decimal(llink_credit_purchase.amount) != amount_decimal or llink_credit_purchase.currency != currency:
+            raise HTTPException(status_code=409, detail="Le montant ne correspond pas à l'achat de crédits Llink.")
     if data.purpose == "llink_subscription":
         llink_subscription = (
             db.query(LlinkSubscription)
@@ -2729,6 +2919,8 @@ def create_payment(
     db.flush()
     if llink_subscription is not None:
         llink_subscription.payment_transaction_id = row.id
+    if llink_credit_purchase is not None:
+        llink_credit_purchase.payment_transaction_id = row.id
     db.commit()
     db.refresh(row)
 
