@@ -177,6 +177,92 @@ def test_cinetpay_success_activates_llink_without_crediting_think_wallet(db_sess
     assert db_session.query(main.Notification).filter_by(user_id=user.id).count() == 1
 
 
+def test_cinetpay_credit_purchase_is_marked_paid_without_think_wallet_credit(db_session):
+    user = _user(db_session)
+    wallet = main.Wallet(
+        user_id=user.id, currency="CDF",
+        available_balance=Decimal("250"), reserved_balance=Decimal("0"),
+    )
+    payment = main.PaymentTransaction(
+        public_id="PAY-" + uuid4().hex[:16].upper(),
+        user_id=user.id, purpose="llink_credits",
+        amount=Decimal("2800"), currency="CDF", provider="cinetpay_v1",
+        merchant_transaction_id="THK" + uuid4().hex[:24].upper(),
+        provider_transaction_id="provider-llink-credit-123",
+        idempotency_key="llink-credit-" + str(user.id) + "-" + uuid4().hex[:12],
+        status="pending", payment_url="https://checkout.example.test/pay",
+        provider_response={"environment": "sandbox"},
+    )
+    db_session.add_all([wallet, payment])
+    db_session.commit()
+    db_session.refresh(payment)
+    purchase = main.LlinkCreditPurchase(
+        user_id=user.id, checkout_id=payment.idempotency_key,
+        credits=100, wallet_type="online", status="pending_payment",
+        amount=Decimal("2800"), currency="CDF", cdf_per_usd=Decimal("2800"),
+        payment_transaction_id=payment.id,
+    )
+    db_session.add(purchase)
+    db_session.commit()
+    provider_status = SimpleNamespace(
+        merchant_transaction_id=payment.merchant_transaction_id,
+        transaction_id=payment.provider_transaction_id,
+        status="SUCCESS", amount="2800", currency="CDF",
+    )
+
+    main._sync_cinetpay_payment_status(db_session, payment, provider_status)
+    db_session.refresh(payment)
+    db_session.refresh(purchase)
+    db_session.refresh(wallet)
+
+    assert payment.status == "accepted"
+    assert purchase.status == "paid"
+    assert purchase.credits == 100
+    assert wallet.available_balance == Decimal("250")
+    assert db_session.query(main.LedgerEntry).count() == 0
+
+    main._sync_cinetpay_payment_status(db_session, payment, provider_status)
+    db_session.refresh(purchase)
+    assert purchase.status == "paid"
+    assert db_session.query(main.Notification).filter_by(user_id=user.id).count() == 1
+
+
+def test_failed_cinetpay_credit_purchase_is_never_marked_paid(db_session):
+    user = _user(db_session)
+    payment = main.PaymentTransaction(
+        public_id="PAY-" + uuid4().hex[:16].upper(),
+        user_id=user.id, purpose="llink_credits",
+        amount=Decimal("2800"), currency="CDF", provider="cinetpay_v1",
+        merchant_transaction_id="THK" + uuid4().hex[:24].upper(),
+        provider_transaction_id="provider-llink-credit-failed",
+        idempotency_key="llink-credit-" + str(user.id) + "-" + uuid4().hex[:12],
+        status="pending", payment_url="https://checkout.example.test/pay",
+        provider_response={"environment": "sandbox"},
+    )
+    db_session.add(payment)
+    db_session.commit()
+    db_session.refresh(payment)
+    purchase = main.LlinkCreditPurchase(
+        user_id=user.id, checkout_id=payment.idempotency_key,
+        credits=100, wallet_type="online", status="pending_payment",
+        amount=Decimal("2800"), currency="CDF", cdf_per_usd=Decimal("2800"),
+        payment_transaction_id=payment.id,
+    )
+    db_session.add(purchase)
+    db_session.commit()
+    provider_status = SimpleNamespace(
+        merchant_transaction_id=payment.merchant_transaction_id,
+        transaction_id="provider-llink-credit-failed", status="FAILED", amount="2800", currency="CDF",
+    )
+
+    main._sync_cinetpay_payment_status(db_session, payment, provider_status)
+    db_session.refresh(payment)
+    db_session.refresh(purchase)
+
+    assert payment.status == "failed"
+    assert purchase.status == "failed"
+
+
 def test_second_llink_subscription_starts_after_previous_expiry(db_session):
     user = _user(db_session)
     previous_end = datetime.now(timezone.utc) + timedelta(days=12)

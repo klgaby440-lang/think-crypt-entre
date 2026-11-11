@@ -2,9 +2,13 @@ name: Think backend validation
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'feature/llink-credit-purchases-*'
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - feature/think-llink-sso-subscriptions
 
 jobs:
   validate:
@@ -29,7 +33,7 @@ jobs:
       - name: Run Think and Llink subscription tests
         run: |
           python -m pip install pytest
-          PYTHONPATH=. pytest -q tests/test_llink_subscription_flow.py
+          PYTHONPATH=. pytest -q tests/test_llink_subscription_flow.py tests/test_llink_credit_pricing.py
 
 
       - name: Set up Node.js
@@ -138,6 +142,7 @@ jobs:
               "transfers",
               "internal_transfers",
               "subscriptions",
+              "llink_credit_purchases",
               "notifications",
           }
           actual = set(main.Base.metadata.tables)
