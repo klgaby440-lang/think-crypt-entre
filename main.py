@@ -709,15 +709,28 @@ def _llink_cdf_per_usd() -> Decimal:
     return rate
 
 
+def _llink_minimum_credit_purchase(rate: Decimal) -> int:
+    """Minimum de crédits qui respecte le plancher CinetPay sans surfacturer l'utilisateur."""
+    return max(
+        1,
+        int((Decimal(100) / (Decimal("0.01") * rate)).to_integral_value(rounding=ROUND_CEILING)),
+    )
+
+
 def _llink_credit_price_cdf(credits: int, rate: Decimal | None = None) -> Decimal:
     if credits < 1 or credits > 500000:
         raise HTTPException(status_code=422, detail="Le nombre de crédits doit être compris entre 1 et 500 000.")
     applied_rate = rate or _llink_cdf_per_usd()
+    minimum = _llink_minimum_credit_purchase(applied_rate)
+    if credits < minimum:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Le minimum CinetPay est de 100 CDF. Au taux actuel, achète au moins {minimum} crédits.",
+        )
     exact = Decimal(credits) * Decimal("0.01") * applied_rate
-    # CinetPay exige un montant CDF entier, multiple de 5, et au moins 100 CDF.
+    # Arrondir au multiple de 5 supérieur, sans jamais transformer le minimum
+    # CinetPay en un prix forfaitaire qui ferait payer trop cher les petits achats.
     amount = (exact / Decimal(5)).to_integral_value(rounding=ROUND_CEILING) * Decimal(5)
-    if amount < 100:
-        amount = Decimal(100)
     if amount > Decimal(2500000):
         raise HTTPException(status_code=422, detail="Le montant dépasse la limite CinetPay de 2 500 000 CDF.")
     return amount
@@ -726,8 +739,13 @@ def _llink_credit_price_cdf(credits: int, rate: Decimal | None = None) -> Decima
 @app.get("/api/llink/credits/catalog")
 def list_llink_credit_catalog():
     rate = _llink_cdf_per_usd()
-    minimum = max(1, int((Decimal(100) / (Decimal("0.01") * rate)).to_integral_value(rounding=ROUND_CEILING)))
-    maximum = min(500000, int((Decimal(2500000) / (Decimal("0.01") * rate)).to_integral_value(rounding=ROUND_HALF_UP)))
+    minimum = _llink_minimum_credit_purchase(rate)
+    maximum = min(
+        500000,
+        int((Decimal(2500000) / (Decimal("0.01") * rate)).to_integral_value(rounding=ROUND_FLOOR)),
+    )
+    if maximum < minimum:
+        raise HTTPException(status_code=503, detail="Le taux LLINK_CDF_PER_USD ne permet aucun achat dans les limites CinetPay.")
     return {
         "product": "llink",
         "credit_usd": "0.01",
@@ -735,8 +753,9 @@ def list_llink_credit_catalog():
         "currency": "CDF",
         "cdf_per_usd": float(rate),
         "minimum_credits": minimum,
-        "maximum_credits": max(minimum, maximum),
-        "wallet_types": ["online", "offline"],
+        "maximum_credits": maximum,
+        "wallet_types": ["online"],
+        "offline_available": False,
     }
 
 
